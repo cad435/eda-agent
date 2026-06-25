@@ -280,6 +280,15 @@ def register_review_tools(mcp):
     ) -> dict[str, Any]:
         """Fetch a comprehensive design-review snapshot in ONE tool call.
 
+        THIS -- the compiled netlist + part data it returns -- is the
+        BASIS of a design review, not a render. Judge connectivity, part
+        values, ratings, and pin functions from these sections (and the
+        cited datasheets), never from `sch_render_svg` / `pcb_render_svg`
+        / `design_visual_review`, which are geometry-only and exist for
+        when an image is genuinely needed (layout/placement). A picture
+        can show a wire that shares no net, or hide a net that is
+        electrically correct -- so the review reads the data here.
+
         PREFER THIS over running 8-12 individual review queries.
         A normal review (components, nets, rules, diff, messages, stats,
         unrouted, BOM) is one round-trip instead of one LLM turn per
