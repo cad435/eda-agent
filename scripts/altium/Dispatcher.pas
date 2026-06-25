@@ -276,6 +276,18 @@ Begin
                 Break;
             End;
 
+            // Renew button: reset the real idle deadline once per click.
+            If RenewRequested Then
+            Begin
+                LastActivityMs := GetTickCount;
+                RenewRequested := False;
+                UpdateStatsLine(
+                    (GetTickCount - StatusStartTick) Div 1000,
+                    StatusRequestCount,
+                    StatusTotalAltiumMs,
+                    AutoShutdownMs Div 1000);
+            End;
+
             // Auto-shutdown after prolonged inactivity. Paused sessions
             // never auto-shutdown so the user can step away indefinitely.
             If PausedFlag Then

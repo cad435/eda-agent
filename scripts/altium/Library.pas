@@ -493,7 +493,7 @@ End;
 Function Lib_AddFootprintPad(Params : String; RequestId : String) : String;
 Var
     Designator, Shape, LayerStr : String;
-    X, Y, XSize, YSize, HoleSize : Integer;
+    X, Y, XSize, YSize, HoleSize, CornerRadius : Integer;
     Rotation : Double;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
@@ -508,6 +508,7 @@ Begin
     Shape := ExtractJsonValue(Params, 'shape');
     LayerStr := ExtractJsonValue(Params, 'layer');
     Rotation := StrToFloatDef(ExtractJsonValue(Params, 'rotation'), 0);
+    CornerRadius := StrToIntDef(ExtractJsonValue(Params, 'corner_radius'), 25);
 
     PcbLib := PCBServer.GetCurrentPCBLibrary;
     If PcbLib = Nil Then
@@ -536,8 +537,25 @@ Begin
         Pad.HoleSize := MilsToCoord(HoleSize);
         Pad.Rotation := Rotation;
 
+        { Layer FIRST (the rounded-rect setters below are layer-aware): a      }
+        { drilled pad is through-hole (MultiLayer); a hole-less pad is SMD on   }
+        { a single layer (the named layer, default Top).                       }
+        If HoleSize > 0 Then
+            Pad.Layer := eMultiLayer
+        Else If LayerStr <> '' Then
+            Pad.Layer := GetLayerFromString(LayerStr)
+        Else
+            Pad.Layer := eTopLayer;
+
+        { Shape. roundrect = the modern IPC default: set the layer-stack shape }
+        { then the corner-radius percentage (Altium stores RR radius as a %).  }
         If Shape = 'rectangular' Then Pad.TopShape := eRectangular
         Else If Shape = 'octagonal' Then Pad.TopShape := eOctagonal
+        Else If (Shape = 'roundrect') Or (Shape = 'rounded_rectangular') Then
+        Begin
+            Pad.SetState_StackShapeOnLayer(Pad.Layer, eRoundedRectangular);
+            Pad.SetState_StackCRPctOnLayer(Pad.Layer, CornerRadius);
+        End
         Else Pad.TopShape := eRounded;
 
         Footprint.AddPCBObject(Pad);
@@ -549,6 +567,112 @@ Begin
 
     PCBServer.PostProcess;
     SaveDocByPath(PcbLib.Board.FileName);
+End;
+
+{ Batch pad authoring: same shape as Lib_AddPins but for PCB pads. Receives a }
+{ `pads` array encoded with the ~~ / ; / = separators NextBatchOp expects,    }
+{ creates every pad inside ONE PreProcess / PostProcess pair and ONE save, so }
+{ a 64-pad QFP costs one IPC round-trip instead of 64. Per-pad fields:        }
+{ designator, x, y, x_size, y_size, hole_size, shape, rotation (mirrors the   }
+{ singular Lib_AddFootprintPad field set / defaults exactly).                 }
+Function Lib_AddFootprintPads(Params : String; RequestId : String) : String;
+Var
+    PadsStr, Op, Remaining, Shape, LayerStr : String;
+    OpCount, Added, Failed : Integer;
+    X, Y, XSize, YSize, HoleSize, CornerRadius : Integer;
+    Rotation : Double;
+    PcbLib : IPCB_Library;
+    Footprint : IPCB_LibComponent;
+    Pad : IPCB_Pad;
+Begin
+    PadsStr := ExtractJsonValue(Params, 'pads');
+    If PadsStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'pads is required');
+        Exit;
+    End;
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
+        Exit;
+    End;
+
+    Footprint := PcbLib.CurrentComponent;
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
+        Exit;
+    End;
+
+    Added := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := PadsStr;
+
+    PCBServer.PreProcess;
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
+            XSize := StrToIntDef(GetBatchField(Op, 'x_size'), 60);
+            YSize := StrToIntDef(GetBatchField(Op, 'y_size'), 60);
+            HoleSize := StrToIntDef(GetBatchField(Op, 'hole_size'), 0);
+            Rotation := StrToFloatDef(GetBatchField(Op, 'rotation'), 0);
+            Shape := GetBatchField(Op, 'shape');
+            LayerStr := GetBatchField(Op, 'layer');
+            CornerRadius := StrToIntDef(GetBatchField(Op, 'corner_radius'), 25);
+
+            Pad := PCBServer.PCBObjectFactory(ePadObject, eNoDimension, eCreate_Default);
+            If Pad = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            Pad.Name := GetBatchField(Op, 'designator');
+            Pad.X := MilsToCoord(X);
+            Pad.Y := MilsToCoord(Y);
+            Pad.TopXSize := MilsToCoord(XSize);
+            Pad.TopYSize := MilsToCoord(YSize);
+            Pad.HoleSize := MilsToCoord(HoleSize);
+            Pad.Rotation := Rotation;
+
+            { Layer FIRST (roundrect setters are layer-aware): drilled ->       }
+            { through-hole (MultiLayer); hole-less -> SMD on a single layer.    }
+            If HoleSize > 0 Then
+                Pad.Layer := eMultiLayer
+            Else If LayerStr <> '' Then
+                Pad.Layer := GetLayerFromString(LayerStr)
+            Else
+                Pad.Layer := eTopLayer;
+
+            If Shape = 'rectangular' Then Pad.TopShape := eRectangular
+            Else If Shape = 'octagonal' Then Pad.TopShape := eOctagonal
+            Else If (Shape = 'roundrect') Or (Shape = 'rounded_rectangular') Then
+            Begin
+                Pad.SetState_StackShapeOnLayer(Pad.Layer, eRoundedRectangular);
+                Pad.SetState_StackCRPctOnLayer(Pad.Layer, CornerRadius);
+            End
+            Else Pad.TopShape := eRounded;
+
+            Footprint.AddPCBObject(Pad);
+            Inc(Added);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(PcbLib.Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount) + '}');
 End;
 
 Function Lib_AddFootprintTrack(Params : String; RequestId : String) : String;
@@ -581,8 +705,10 @@ Begin
         Exit;
     End;
 
-    If LayerStr = 'BottomOverlay' Then Layer := eBottomOverlay
-    Else Layer := eTopOverlay;
+    { Empty -> silkscreen (the safe default); any named layer is honoured so   }
+    { courtyard/assembly tracks can go on Mechanical layers, not just overlay. }
+    If LayerStr = '' Then Layer := eTopOverlay
+    Else Layer := GetLayerFromString(LayerStr);
 
     PCBServer.PreProcess;
 
@@ -605,6 +731,92 @@ Begin
 
     PCBServer.PostProcess;
     SaveDocByPath(PcbLib.Board.FileName);
+End;
+
+{ Batch track authoring: same shape as Lib_AddFootprintPads. A `tracks` array }
+{ (~~ / ; / = separators) -- silkscreen outline + assembly outline in one IPC }
+{ round-trip instead of one-per-segment. Per-track fields: x1,y1,x2,y2,width, }
+{ layer (TopOverlay default / BottomOverlay), mirroring the singular handler. }
+Function Lib_AddFootprintTracks(Params : String; RequestId : String) : String;
+Var
+    TracksStr, Op, Remaining, LayerStr : String;
+    OpCount, Added, Failed : Integer;
+    X1, Y1, X2, Y2, Width : Integer;
+    PcbLib : IPCB_Library;
+    Footprint : IPCB_LibComponent;
+    Track : IPCB_Track;
+    Layer : TLayer;
+Begin
+    TracksStr := ExtractJsonValue(Params, 'tracks');
+    If TracksStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'tracks is required');
+        Exit;
+    End;
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No PCB library is active');
+        Exit;
+    End;
+
+    Footprint := PcbLib.CurrentComponent;
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT', 'No footprint is selected');
+        Exit;
+    End;
+
+    Added := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := TracksStr;
+
+    PCBServer.PreProcess;
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            X1 := StrToIntDef(GetBatchField(Op, 'x1'), 0);
+            Y1 := StrToIntDef(GetBatchField(Op, 'y1'), 0);
+            X2 := StrToIntDef(GetBatchField(Op, 'x2'), 0);
+            Y2 := StrToIntDef(GetBatchField(Op, 'y2'), 0);
+            Width := StrToIntDef(GetBatchField(Op, 'width'), 10);
+            LayerStr := GetBatchField(Op, 'layer');
+            { Empty -> silkscreen (the safe default); any named layer is        }
+            { honoured so courtyard/assembly tracks can go on Mechanical layers.}
+            If LayerStr = '' Then Layer := eTopOverlay
+            Else Layer := GetLayerFromString(LayerStr);
+
+            Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
+            If Track = Nil Then
+            Begin
+                Inc(Failed);
+                Continue;
+            End;
+
+            Track.X1 := MilsToCoord(X1);
+            Track.Y1 := MilsToCoord(Y1);
+            Track.X2 := MilsToCoord(X2);
+            Track.Y2 := MilsToCoord(Y2);
+            Track.Width := MilsToCoord(Width);
+            Track.Layer := Layer;
+
+            Footprint.AddPCBObject(Track);
+            Inc(Added);
+        End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    SaveDocByPath(PcbLib.Board.FileName);
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount) + '}');
 End;
 
 Function Lib_AddFootprintArc(Params : String; RequestId : String) : String;
@@ -638,8 +850,10 @@ Begin
         Exit;
     End;
 
-    If LayerStr = 'BottomOverlay' Then Layer := eBottomOverlay
-    Else Layer := eTopOverlay;
+    { Empty -> silkscreen (the safe default); any named layer is honoured so   }
+    { pin-1 / assembly arcs can go on Mechanical layers, not just overlay.      }
+    If LayerStr = '' Then Layer := eTopOverlay
+    Else Layer := GetLayerFromString(LayerStr);
 
     PCBServer.PreProcess;
 
@@ -4106,7 +4320,9 @@ Begin
         'add_symbol_lines':     Result := Lib_AddSymbolLines(Params, RequestId);
         'create_footprint':     Result := Lib_CreateFootprint(Params, RequestId);
         'add_footprint_pad':    Result := Lib_AddFootprintPad(Params, RequestId);
+        'add_footprint_pads':   Result := Lib_AddFootprintPads(Params, RequestId);
         'add_footprint_track':  Result := Lib_AddFootprintTrack(Params, RequestId);
+        'add_footprint_tracks': Result := Lib_AddFootprintTracks(Params, RequestId);
         'add_footprint_arc':    Result := Lib_AddFootprintArc(Params, RequestId);
         'add_footprint_text':   Result := Lib_AddFootprintText(Params, RequestId);
         'get_footprints':       Result := Lib_GetFootprints(Params, RequestId);
