@@ -27,6 +27,8 @@ FIXTURE = Path(__file__).resolve().parent / "integration" / "fixtures" / "main.S
 
 @pytest.fixture(scope="module")
 def components():
+    if not FIXTURE.exists():
+        pytest.skip("needs local-only binary fixture main.SchDoc")
     return read_schematic_components(FIXTURE)
 
 
