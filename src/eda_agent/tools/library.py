@@ -20,6 +20,171 @@ from ..config import get_config
 # This is a hard invariant, not a hint -- every coord goes through here.
 _SCHEMATIC_GRID_MILS = 100
 
+# Footprint-policy sweep: footprints per bulk-geometry page, and the per-page
+# timeout. The first page also opens the PcbLib, which on a large library is
+# seconds; the default command timeout is far too short for it.
+_GEOMETRY_PAGE = 250
+_GEOMETRY_TIMEOUT = 120.0
+
+# A repaired designator further than this from its pads did not land on the
+# part. The biggest footprints here span a couple of thousand mils; a designator
+# dropped at the board origin is ~50000 away.
+_STRAY_MILS = 5000
+
+# Apply/reload passes before giving up. Each pass fixes what the previous one's
+# geometry change revealed (a resized text has a new bounding box). Convergence
+# is fast -- ~90% in the first pass -- so this is a runaway guard, not a budget.
+_MAX_PASSES = 6
+
+
+def _edit_line(act: dict) -> str:
+    """One tab-separated edit row: name, layer_id, x, y, height, create.
+
+    An empty field tells the script to leave that property alone.
+    """
+    def _f(key):
+        v = act.get(key)
+        return "" if v is None else str(v)
+
+    return "\t".join((
+        str(act["footprint"]), _f("layer_id"), _f("x"), _f("y"), _f("height"),
+        "1" if act.get("create") else "0",
+    ))
+
+
+def write_designator_edits(workspace_dir, actions) -> tuple:
+    """Write the edit file the bulk script reads. Returns (path, written,
+    rejected).
+
+    A footprint whose name contains a tab or newline cannot be expressed in
+    this format; it is rejected rather than silently corrupting the row that
+    follows it. Written atomically (temp + replace) so the script can never
+    observe a half-written file.
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+
+    written, rejected = [], []
+    for act in actions:
+        name = str(act.get("footprint", ""))
+        if not name or "\t" in name or "\n" in name or "\r" in name:
+            rejected.append({"footprint": name,
+                             "reason": "name contains a tab or newline"})
+            continue
+        written.append(act)
+
+    path = Path(workspace_dir) / "designator_edits.tsv"
+    body = "".join(_edit_line(a) + "\n" for a in written)
+    fd, tmp = tempfile.mkstemp(dir=str(workspace_dir), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as f:
+            f.write(body)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return path, written, rejected
+
+
+def _same_plan(a, b) -> bool:
+    """Two plans that ask for exactly the same edits. If a pass applied and the
+    next plan is identical, nothing landed and repeating will not help."""
+    def key(acts):
+        return sorted((x["footprint"], x.get("x"), x.get("y"),
+                       x.get("layer_id"), x.get("height"), x.get("create"))
+                      for x in acts)
+    return bool(a) and key(a) == key(b)
+
+
+async def _reload_library(bridge, library_path) -> bool:
+    """Close and reopen the PcbLib so Altium rebuilds its caches from disk.
+
+    ``IPCB_Text.BoundingRectangle`` is populated at load and is NOT refreshed by
+    assigning XLocation or Size. Without a reload, everything read after a write
+    reports the text's OLD extent, and a centring pass computed from that moves
+    the text by a wrong delta. Save before calling this.
+    """
+    if not library_path:
+        return False
+    try:
+        res = await bridge.send_command_async(
+            "library.reload_library", {"library_path": library_path},
+            timeout=_GEOMETRY_TIMEOUT)
+        return bool(isinstance(res, dict) and res.get("reloaded"))
+    except Exception:
+        return False
+
+
+async def _apply_edits(bridge, actions, resolved_path, failed):
+    """Write one batch of designator edits. Returns (applied, created)."""
+    edits_path, written, rejected = write_designator_edits(
+        bridge.config.workspace_dir, actions)
+    failed.extend(rejected)
+    if not written:
+        return 0, 0
+
+    params = {"edits_path": str(edits_path)}
+    if resolved_path:
+        params["library_path"] = resolved_path
+    try:
+        res = await bridge.send_command_async(
+            "library.set_designators", params, timeout=_GEOMETRY_TIMEOUT)
+        res = res if isinstance(res, dict) else {}
+    except Exception as e:
+        failed.append({"footprint": "*", "error": str(e)})
+        return 0, 0
+
+    if res.get("failed"):
+        failed.append({"footprint": "*",
+                       "error": f"{res['failed']} edits failed"})
+    if res.get("refused"):
+        # The script refused to create a designator on a footprint that already
+        # had one. Never silent: that guard firing means reader and writer
+        # disagree about what exists.
+        failed.append({"footprint": "*",
+                       "error": f"{res['refused']} creates refused "
+                                f"(footprint already had a .Designator)"})
+    for name in res.get("missing", []):
+        failed.append({"footprint": name, "error": "not found in library"})
+    for name in res.get("immovable", []):
+        # The script assigned XLocation, read it back, and it had not changed.
+        # Silently counting these as applied hid failed repairs behind a
+        # success total for an entire session.
+        failed.append({"footprint": name,
+                       "error": "designator did not move (XLocation refused "
+                                "the assignment)"})
+    return res.get("applied", 0), res.get("created", 0)
+
+
+async def _read_library_geometry(bridge, library_path):
+    """Page the whole library's policy geometry. Returns (footprints, path)."""
+    base: dict[str, Any] = {}
+    if library_path:
+        base["library_path"] = library_path
+    footprints: list[dict[str, Any]] = []
+    resolved: Optional[str] = None
+    offset, total = 0, None
+    while total is None or offset < total:
+        page = await bridge.send_command_async(
+            "library.get_library_geometry",
+            dict(base, offset=offset, limit=_GEOMETRY_PAGE),
+            timeout=_GEOMETRY_TIMEOUT,
+        )
+        if not isinstance(page, dict):
+            break
+        resolved = resolved or page.get("library_path")
+        total = page.get("total") or 0
+        batch = page.get("footprints") or []
+        footprints.extend(batch)
+        if not batch:  # never spin if the script reports a short page
+            break
+        offset += len(batch)
+    return footprints, (resolved or library_path)
+
 
 def _snap(value: int) -> int:
     """Round a mil coordinate to the schematic 100-mil grid.
@@ -1024,6 +1189,325 @@ def register_library_tools(mcp):
         result = await bridge.send_command_async(
             "library.get_footprints", params,
         )
+        return result
+
+    @mcp.tool()
+    async def lib_audit_footprint_policies(
+        library_path: Optional[str] = None,
+        policy: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        """Sweep a PcbLib and flag footprints that break the library's own
+        conventions — inconsistent layer usage, pad rules, pin-1 markings,
+        courtyard, silkscreen, 3D models, designator style.
+
+        For each policy dimension it learns the library's DOMINANT convention
+        across all footprints and reports every footprint that deviates (so it
+        works on any house style without hard-coded rules). Pass ``policy`` to
+        pin a dimension to a required value instead, e.g.
+        ``{"silk_layer": "Top Overlay", "courtyard": true}``.
+
+        Each finding names the footprint, the dimension, and the expected vs
+        actual value — enough to drive a fix, not just a report.
+
+        Designators are checked for presence, layer, height, and for sitting on
+        the footprint's AVERAGE PAD CENTRE rather than the library origin (which
+        is arbitrary). Tune the centring window with
+        ``policy={"designator_center_tol": <mils>}``.
+
+        Geometry is read with the bulk ``library.get_library_geometry``
+        command, which walks the library once and pages the result. A library
+        of ~1000 footprints is one pass and a handful of round trips rather
+        than one round trip (and one full library re-scan) per footprint.
+
+        Args:
+            library_path: Optional .PcbLib to focus first; defaults to the
+                focused library.
+            policy: Optional explicit conventions to enforce; omitted
+                dimensions are inferred from the library.
+
+        Returns ``{library_path, footprint_count, conventions, findings,
+        summary}``.
+        """
+        from ..design.footprint_policy import (
+            audit_footprint_library,
+            plan_footprint_fixes,
+        )
+
+        bridge = get_bridge()
+        footprints, resolved_path = await _read_library_geometry(
+            bridge, library_path)
+        report = audit_footprint_library(footprints, policy=policy)
+        report["fixes"] = plan_footprint_fixes(report)
+        report["library_path"] = resolved_path
+        return report
+
+    @mcp.tool()
+    async def lib_convert_designators_to_stroke(
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Convert every TrueType ``.Designator`` in a PcbLib to a stroke font.
+
+        A TrueType PCB text will not persist a position change made through
+        ``XLocation`` — the write reads back changed, then Altium recomputes the
+        position from the TrueType layout on reload and it reverts. That is why a
+        handful of designators per library refuse to centre. ``Bold``/``Italic``
+        are TrueType-only attributes (a stroke text cannot be bold), so a bold or
+        italic designator is the reliable TrueType tell.
+
+        This clears ``UseTTFonts``, ``Bold`` and ``Italic`` on each such
+        designator, reads back to confirm, saves, and reloads. Afterwards those
+        designators are stroke and ``lib_fix_designators`` can centre them.
+
+        Returns ``{library_path, designators, converted, names, saved}``.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {}
+        if library_path:
+            params["library_path"] = library_path
+        res = await bridge.send_command_async(
+            "library.convert_designators_to_stroke", params,
+            timeout=_GEOMETRY_TIMEOUT)
+        res = res if isinstance(res, dict) else {}
+        saved = False
+        if res.get("converted"):
+            resolved = res.get("library_path") or library_path
+            try:
+                await bridge.send_command_async(
+                    "application.save_all", {}, timeout=_GEOMETRY_TIMEOUT)
+                saved = True
+            except Exception as e:
+                res.setdefault("errors", []).append(f"save failed: {e}")
+            await _reload_library(bridge, resolved)
+        res["saved"] = saved
+        return res
+
+    @mcp.tool()
+    async def lib_reload_library(library_path: str) -> dict[str, Any]:
+        """Close and reopen a PcbLib so Altium rebuilds its caches from disk.
+
+        ``IPCB_Text.BoundingRectangle`` is populated when the document loads and
+        is NOT refreshed when a text moves or is resized — not even by
+        ``GraphicallyInvalidate``. Anything that reads a text's extent after
+        writing to it therefore gets the OLD box. Reload between a write and the
+        next read.
+
+        SAVE FIRST: this does not save, and closing a dirty document loses the
+        edits or raises a prompt. ``lib_fix_designators`` already does this.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.reload_library", {"library_path": library_path},
+            timeout=_GEOMETRY_TIMEOUT)
+
+    @mcp.tool()
+    async def lib_probe_designator(
+        footprint_name: str,
+        library_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Diagnostic: dump one footprint's raw designator geometry.
+
+        Read-only. Returns the footprint origin and bounding rectangle, the pad
+        extents, and the ``.Designator`` anchor, bounding rectangle, size and
+        width — all in native TCoord. Use it to establish what
+        ``IPCB_Text.BoundingRectangle`` actually measures before trusting it to
+        centre anything.
+
+        Returns ``{footprint, fp_x, fp_y, fp_rect, pad_count, pad_rect,
+        desig_anchor, desig_rect, desig_size, desig_width, desig_text}``.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"footprint_name": footprint_name}
+        if library_path:
+            params["library_path"] = library_path
+        return await bridge.send_command_async(
+            "library.probe_designator", params, timeout=_GEOMETRY_TIMEOUT)
+
+    @mcp.tool()
+    async def lib_fix_designators(
+        library_path: Optional[str] = None,
+        dry_run: bool = True,
+        fix_layer: bool = True,
+        fix_center: bool = True,
+        fix_height: bool = False,
+        add_missing: bool = False,
+        policy: Optional[dict] = None,
+    ) -> dict[str, Any]:
+        """Bring every footprint's ``.Designator`` onto the library's OWN
+        convention: the layer, height and centring the majority already use.
+
+        Nothing is hard-coded. The target layer, its raw ordinal, the norm
+        height and the centring tolerance are all inferred from this library
+        (see ``lib_audit_footprint_policies``); ``policy`` overrides any of
+        them. "Centred" means on the AVERAGE PAD CENTRE, not the library
+        origin.
+
+        DEFAULTS TO A DRY RUN. With ``dry_run=True`` (the default) it reports
+        exactly which footprints it would touch, on which layer, and at which
+        coordinates, and writes nothing. Pass ``dry_run=False`` to apply.
+
+        Applying RUNS TO CONVERGENCE: apply, save, reload the PcbLib, re-plan,
+        repeat until nothing is left. The reload is mandatory, not cosmetic —
+        Altium caches each text's bounding rectangle at load and never refreshes
+        it when the text moves or is resized, so a second pass without a reload
+        would centre against stale geometry and shove designators off the part.
+        Resizing a text also changes its box, so height fixes and centring
+        settle over successive passes rather than one.
+
+        PARTIAL SUCCESS IS EXPECTED AND REPORTED, NOT HIDDEN. A small number of
+        designators (a handful per library) do not persist a position change
+        through Altium's save for reasons not yet diagnosed — the write reads
+        back changed but the value reverts on reload. Rather than loop forever or
+        claim success, the tool stops when a pass makes no progress and returns
+        ``converged: false`` with the offending footprints in ``unrepairable``
+        for a human to centre by hand. Everything else is applied. ``applied``
+        counts only writes confirmed by read-back, never attempts.
+
+        Args:
+            library_path: .PcbLib to fix; defaults to the focused library.
+            dry_run: report the plan without writing (default True).
+            fix_layer: move designators off the convention layer onto it.
+            fix_center: re-centre designators beyond the library's tolerance.
+            fix_height: also normalise text height to the library norm.
+            add_missing: create a ``.Designator`` on footprints that lack one.
+            policy: explicit conventions, e.g.
+                ``{"designator_center_tol": 50, "designator_height": 20}``.
+
+        Returns ``{library_path, dry_run, conventions, planned, applied,
+        created, passes, converged, failed, skipped, actions}``.
+        """
+        from ..design.footprint_policy import plan_designator_repairs
+
+        bridge = get_bridge()
+        footprints, resolved_path = await _read_library_geometry(
+            bridge, library_path)
+        if not footprints:
+            return {"success": False,
+                    "error": "no footprints (open the PcbLib)"}
+
+        plan = plan_designator_repairs(
+            footprints, fix_layer=fix_layer, fix_center=fix_center,
+            fix_height=fix_height, add_missing=add_missing, policy=policy)
+        actions = plan["actions"]
+
+        result: dict[str, Any] = {
+            "library_path": resolved_path,
+            "dry_run": dry_run,
+            "conventions": plan["conventions"],
+            "planned": len(actions),
+            "skipped": plan["skipped"],
+            "actions": actions,
+        }
+        if dry_run or not actions:
+            result["applied"] = 0
+            result["failed"] = []
+            return result
+
+        # Baseline BEFORE any write: the loop rebinds `footprints` each pass,
+        # and blaming a write for duplicates that were already there makes the
+        # guard cry wolf and stop being believed.
+        from ..design.footprint_policy import _designator_count
+        before_dupes = {fp.get("name") for fp in footprints
+                        if _designator_count(fp) > 1}
+
+        # Apply, save, RELOAD, re-plan -- until nothing is left to do.
+        #
+        # One pass is never enough. Altium caches each text's BoundingRectangle
+        # at load and does not refresh it when XLocation or Size changes, so
+        # after a write every rectangle in memory is stale. Centring is computed
+        # from that rectangle, so a second pass in the same session would move
+        # designators by a wrong delta. Reloading the document drops the caches;
+        # the next read gets true geometry. Resizing a text also changes its
+        # box, so height fixes and centring genuinely need separate passes.
+        failed: list[dict] = []
+        applied, created, saved, passes = 0, 0, False, 0
+        touched: set = set()
+
+        while actions and passes < _MAX_PASSES:
+            passes += 1
+            touched.update(a["footprint"] for a in actions)
+            a, c = await _apply_edits(bridge, actions, resolved_path, failed)
+            applied += a
+            created += c
+            if not a:
+                break
+
+            try:
+                await bridge.send_command_async(
+                    "application.save_all", {}, timeout=_GEOMETRY_TIMEOUT)
+                saved = True
+            except Exception as e:
+                failed.append({"footprint": "*", "error": f"save failed: {e}"})
+                break
+
+            if not await _reload_library(bridge, resolved_path):
+                failed.append({
+                    "footprint": "*",
+                    "error": "library reload failed; stopping after one pass "
+                             "(further passes would read a stale bounding-box "
+                             "cache and misplace designators)"})
+                break
+
+            footprints, _ = await _read_library_geometry(bridge, resolved_path)
+            next_actions = plan_designator_repairs(
+                footprints, fix_layer=fix_layer, fix_center=fix_center,
+                fix_height=fix_height, add_missing=add_missing,
+                policy=policy)["actions"]
+
+            # A pass that changes nothing will never change anything. Repeating
+            # it burns passes and, worse, reports a growing `applied` count for
+            # edits that are not landing.
+            if _same_plan(actions, next_actions):
+                stuck = [a["footprint"] for a in next_actions]
+                failed.append({
+                    "footprint": "*",
+                    "error": f"{len(stuck)} designators would not move; "
+                             f"stopping (no progress): {', '.join(stuck[:10])}"})
+                actions = next_actions
+                break
+            actions = next_actions
+
+        result["passes"] = passes
+        result["converged"] = not actions
+        if actions:
+            result["remaining"] = len(actions)
+            result["unrepairable"] = [a["footprint"] for a in actions][:25]
+
+        # Read the library BACK and confirm no footprint gained a second
+        # .Designator. A create that lands on the wrong component is invisible
+        # to the writer, so the only honest check is to re-measure.
+        if applied:
+            from ..design.footprint_policy import _designator_offsets
+
+            after, _ = await _read_library_geometry(bridge, resolved_path)
+            dupes = [fp.get("name") for fp in after
+                     if _designator_count(fp) > 1
+                     and fp.get("name") not in before_dupes]
+            result["verified_no_duplicates"] = not dupes
+            result["preexisting_duplicates"] = sorted(before_dupes)
+            if dupes:
+                result["duplicates_created"] = dupes[:25]
+                failed.append({
+                    "footprint": "*",
+                    "error": f"{len(dupes)} footprints now have duplicate "
+                             f".Designator strings — RESTORE FROM BACKUP"})
+
+            # A designator left at the board origin instead of on its part sits
+            # tens of thousands of mils away. Nothing legitimate does that.
+            stray = [fp.get("name") for fp, off, _, _ in
+                     _designator_offsets(after)
+                     if fp.get("name") in touched and off > _STRAY_MILS]
+            result["verified_no_stray_designators"] = not stray
+            if stray:
+                result["strays_created"] = stray[:25]
+                failed.append({
+                    "footprint": "*",
+                    "error": f"{len(stray)} designators landed >{_STRAY_MILS} "
+                             f"mils from their pads — RESTORE FROM BACKUP"})
+
+        result["applied"] = applied
+        result["created"] = created
+        result["failed"] = failed
+        result["saved"] = saved
         return result
 
     # =========================================================================

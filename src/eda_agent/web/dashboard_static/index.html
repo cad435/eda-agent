@@ -1165,9 +1165,20 @@ main > section.full-bleed {
   border-bottom: 1px solid var(--border);
 }
 .drawing-toolbar .toolbar-right { margin-left: auto; }
+/* Recovery banner: shown when the DelphiScript polling loop has faulted
+   (see /api/recovery). High-contrast warning so it's impossible to miss. */
+.recovery-banner {
+  background: #7a1f1f; color: #fff; padding: 10px 16px;
+  font-size: 13px; line-height: 1.5; border-bottom: 2px solid #b03535;
+}
+.recovery-banner .rb-title { font-weight: 600; margin-right: 6px; }
+.recovery-banner ol { margin: 6px 0 0; padding-left: 22px; }
+.recovery-banner li { margin: 2px 0; }
 </style>
 </head>
 <body>
+
+<div id="recovery-banner" class="recovery-banner" hidden role="alert"></div>
 
 <header class="shell">
   <div class="brand">EDA Agent <span class="v" id="brand-v">design dashboard</span></div>
@@ -1195,6 +1206,7 @@ main > section.full-bleed {
   <button data-tab="components">Components<span class="tab-count" data-count-for="components"></span></button>
   <button data-tab="nets">Nets<span class="tab-count" data-count-for="nets"></span></button>
   <button data-tab="libraries">Libraries<span class="tab-count" data-count-for="libraries"></span></button>
+  <button data-tab="footprints">Footprints<span class="tab-count" data-count-for="footprints"></span></button>
   <button data-tab="plan">Plan<span class="tab-count" data-count-for="plan"></span></button>
   <button data-tab="assembly">Assembly<span class="tab-count" data-count-for="assembly"></span></button>
   <button data-tab="actions">Actions</button>
@@ -1510,6 +1522,15 @@ main > section.full-bleed {
       <h2>inventory snapshot</h2>
       <div class="hint" id="lib-source"></div>
       <div id="lib-body" style="margin-top:10px;"><div class="empty">loading...</div></div>
+    </div>
+  </section>
+
+  <!-- ==================== FOOTPRINT POLICY TAB ==================== -->
+  <section data-pane="footprints" hidden>
+    <div class="panel">
+      <h2>footprint policy audit</h2>
+      <div class="hint" id="fp-policy-source"></div>
+      <div id="fp-policy-body" style="margin-top:10px;"><div class="empty">loading...</div></div>
     </div>
   </section>
 
@@ -2163,6 +2184,7 @@ async function loadTab(name) {
   else if (name === "components") p = loadComponents();
   else if (name === "nets")       p = loadNets();
   else if (name === "libraries")  p = loadLibraries();
+  else if (name === "footprints") p = loadFootprints();
   else if (name === "plan")       p = loadPlan();
   else if (name === "assembly")   p = loadAssembly();
   else if (name === "actions")    p = loadActions();
@@ -5871,6 +5893,94 @@ async function loadLibraries() {
   renderLibraries(r);
 }
 
+async function loadFootprints() {
+  const r = await fetchJSON("/api/footprint-policy");
+  renderFootprints(r);
+}
+
+function renderFootprints(r) {
+  const root = $("#fp-policy-body");
+  const src = $("#fp-policy-source");
+  root.innerHTML = "";
+  if (!r || r.available === false) {
+    src.textContent = "";
+    root.appendChild(emptyBox((r && r.reason) || "no PcbLib open",
+      "Open a .PcbLib in Altium, then reload. Runs lib_audit_footprint_policies over every footprint."));
+    return;
+  }
+  src.textContent = (r.library_path || "PcbLib") + "  ·  " +
+    (r.footprint_count || 0) + " footprints  ·  " +
+    (r.clean_count || 0) + " clean";
+
+  const roll = r.per_footprint || [];
+  if (roll.length) {
+    const strip = el("div", {class:"row-actions",
+      style:"margin-bottom:12px;flex-wrap:wrap;"});
+    roll.forEach(function(fp){
+      strip.appendChild(el("span",
+        {class:"tag " + (fp.ok ? "ok" : "warn"),
+         title: fp.issues + " issue(s)"},
+        fp.name + (fp.ok ? "" : " (" + fp.issues + ")")));
+    });
+    root.appendChild(strip);
+  }
+
+  const sum = r.summary || {};
+  root.appendChild(el("div", {class:"row-actions", style:"margin-bottom:12px;"},
+    el("span", {class:"tag " + (sum.error ? "err" : "ok")}, (sum.error||0) + " error"),
+    el("span", {class:"tag " + (sum.warning ? "warn" : "ok")}, (sum.warning||0) + " warning"),
+    el("span", {class:"tag info"}, (sum.info||0) + " info")));
+
+  const conv = r.conventions || {};
+  const convRow = el("div", {class:"row-actions", style:"margin-bottom:14px;flex-wrap:wrap;"});
+  Object.keys(conv).forEach(function(k){
+    if (conv[k] === null || conv[k] === undefined) return;
+    convRow.appendChild(el("span", {class:"tag info"}, k + ": " + conv[k]));
+  });
+  if (convRow.children.length) {
+    root.appendChild(el("div", {class:"hint", style:"margin-bottom:4px;"},
+      "inferred library conventions"));
+    root.appendChild(convRow);
+  }
+
+  const fixes = r.fixes || [];
+  const autoFixes = fixes.filter(function(a){ return a.auto; });
+  if (autoFixes.length) {
+    root.appendChild(el("div", {class:"hint", style:"margin-bottom:4px;"},
+      autoFixes.length + " auto-correctable (mechanical layer/height/pad fixes)"));
+    const fixRow = el("div", {style:"margin-bottom:14px;"});
+    autoFixes.forEach(function(a){
+      fixRow.appendChild(el("div", {class:"hint", style:"margin:2px 0;"},
+        "→ " + (a.description || (a.footprint + ": " + a.action))));
+    });
+    root.appendChild(fixRow);
+  }
+
+  const findings = r.findings || [];
+  if (!findings.length) {
+    root.appendChild(el("div", {class:"tag ok", style:"font-size:14px;"},
+      "✓ every footprint follows the library conventions"));
+    return;
+  }
+  findings.slice().sort(function(a,b){
+    return (a.footprint||"").localeCompare(b.footprint||"");
+  }).forEach(function(f){
+    const sev = f.severity === "error" ? "err"
+      : (f.severity === "warning" ? "warn" : "info");
+    const row = el("div", {class:"panel", style:"background:var(--bg-elev);margin-bottom:6px;"});
+    row.appendChild(el("div", {class:"row-actions"},
+      el("span", {class:"tag " + sev}, f.severity),
+      el("strong", {}, f.footprint || "?"),
+      el("span", {class:"tag info"}, f.dimension || "")));
+    if (f.message) row.appendChild(el("div", {class:"hint", style:"margin-top:4px;"}, f.message));
+    if (f.expected !== null && f.expected !== undefined) {
+      row.appendChild(el("div", {class:"hint"},
+        "expected " + JSON.stringify(f.expected) + "  ·  actual " + JSON.stringify(f.actual)));
+    }
+    root.appendChild(row);
+  });
+}
+
 function renderLibraries(r) {
   const root = $("#lib-body");
   const src = $("#lib-source");
@@ -6817,6 +6927,34 @@ function tickSparklines() {
 async function pollIntent() {
   const r = await fetchJSON("/api/intent");
   $("#intent-banner").textContent = r.intent || "";
+}
+
+// Recovery banner: surfaces a DelphiScript engine fault + how to recover.
+// Hidden while the polling loop is healthy; the bridge clears the fault
+// state once a command succeeds again, so this auto-dismisses on recovery.
+async function pollRecovery() {
+  const el = $("#recovery-banner");
+  if (!el) return;
+  let r;
+  try { r = await fetchJSON("/api/recovery"); }
+  catch (e) { return; }
+  const rec = r && r.recovery;
+  if (!rec) { el.hidden = true; el.innerHTML = ""; return; }
+  const steps = (rec.steps || []).map(function(s){
+    const li = document.createElement("li"); li.textContent = s; return li;
+  });
+  el.innerHTML = "";
+  const title = document.createElement("span");
+  title.className = "rb-title";
+  title.textContent = "Altium script loop stopped:";
+  const diag = document.createTextNode(" " + (rec.diagnosis || ""));
+  el.appendChild(title); el.appendChild(diag);
+  if (steps.length) {
+    const ol = document.createElement("ol");
+    steps.forEach(function(li){ ol.appendChild(li); });
+    el.appendChild(ol);
+  }
+  el.hidden = false;
 }
 
 /* ============================ Component helpers ============================ */
@@ -9315,6 +9453,8 @@ window.addEventListener("DOMContentLoaded", function dlPlaceholder(){
   }
   loadDrawing();
   pollIntent();
+  pollRecovery();
+  setInterval(pollRecovery, 3000);
   pollHealth();
   setInterval(pollHealth, 3000);
   pollScriptVersion();             // initial fetch on dashboard load

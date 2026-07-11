@@ -15,6 +15,7 @@ client (Claude Code), this is just the tool layer it drives.
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Optional, Union
 
@@ -139,6 +140,213 @@ def register_design_tools(mcp) -> None:
             "discipline": get_discipline(),
             "schema": DesignPlan.model_json_schema(),
         }
+
+    # --- session journal (autonomy-harness durable state) ----------------
+
+    def _session_store():
+        from ..config import get_config
+        from ..design.session import SessionStore
+        return SessionStore(get_config().workspace_dir / "design_sessions")
+
+    def _resolve_journal(session_id: str):
+        """Return a journal for session_id, or the active one if blank."""
+        store = _session_store()
+        if session_id:
+            return store.get(session_id)
+        return store.active()
+
+    @mcp.tool()
+    async def design_session_start(requirement: str, session_id: str = "") -> dict[str, Any]:
+        """Open a durable design-session journal for an autonomous run.
+
+        The journal is append-only state that survives context compaction,
+        client restarts, and model switches, so any later client can resume
+        the run from recorded fact instead of chat history. Call this once at
+        the start of a spec-to-board task, then log stage results as you go
+        and read `design_session_resume` to know what's next.
+
+        Args:
+            requirement: the design requirement text this run implements.
+            session_id: optional explicit id; defaults to a timestamp.
+
+        Returns:
+            ``{"session_id": ..., "state": {...}}``.
+        """
+        store = _session_store()
+        journal = store.start(requirement, session_id=session_id or None)
+        return {"session_id": journal.session_id, "state": asdict(journal.state())}
+
+    @mcp.tool()
+    async def design_session_log(
+        event: str,
+        session_id: str = "",
+        stage: str = "",
+        status: str = "",
+        text: str = "",
+        path: str = "",
+        kind: str = "",
+        question: str = "",
+        revision: int = 0,
+    ) -> dict[str, Any]:
+        """Append one event to a design-session journal.
+
+        ``event`` is one of: ``stage_enter`` (needs ``stage``),
+        ``stage_result`` (``stage`` + ``status`` = ok|blocked|failed),
+        ``plan_revision`` (``revision``), ``artifact`` (``path``, ``kind``),
+        ``blocked`` (``question``), ``resolved`` (``text`` = answer),
+        ``note`` (``text``). Returns the updated derived state.
+        """
+        journal = _resolve_journal(session_id)
+        if journal is None:
+            return {"error": "no active design session; call design_session_start first"}
+        try:
+            if event == "stage_enter":
+                journal.enter_stage(stage)
+            elif event == "stage_result":
+                journal.stage_result(stage, status, verdict=text)
+            elif event == "plan_revision":
+                journal.plan_revision(revision, summary=text)
+            elif event == "artifact":
+                journal.artifact(path, kind=kind)
+            elif event == "blocked":
+                journal.blocked(question, stage=stage)
+            elif event == "resolved":
+                journal.resolved(text)
+            elif event == "note":
+                journal.note(text)
+            else:
+                return {"error": f"unknown event kind: {event!r}"}
+        except ValueError as e:
+            return {"error": str(e)}
+        return {"session_id": journal.session_id, "state": asdict(journal.state())}
+
+    @mcp.tool()
+    async def design_session_status(session_id: str = "") -> dict[str, Any]:
+        """Read a design session's derived state (stage map, artifacts, ...).
+
+        With no ``session_id`` the most recently active session is used.
+        """
+        journal = _resolve_journal(session_id)
+        if journal is None:
+            return {"error": "no design sessions found"}
+        return {"session_id": journal.session_id, "state": asdict(journal.state())}
+
+    @mcp.tool()
+    async def design_session_resume(session_id: str = "") -> dict[str, Any]:
+        """Resume a design run: state plus a plain-language next-action hint.
+
+        Surfaces any open blocking question first (answer it before
+        proceeding), otherwise names the next pipeline stage to work on. Use
+        this at the start of a fresh client session to pick up where the last
+        one stopped.
+        """
+        journal = _resolve_journal(session_id)
+        if journal is None:
+            return {"error": "no design sessions found; start one with design_session_start"}
+        state = journal.state()
+        if state.open_question:
+            guidance = f"BLOCKED — ask the user: {state.open_question}"
+        elif state.complete:
+            guidance = "All 13 pipeline stages complete."
+        else:
+            guidance = f"Next stage: {state.next_stage}"
+        return {
+            "session_id": journal.session_id,
+            "guidance": guidance,
+            "state": asdict(state),
+        }
+
+    @mcp.tool()
+    async def design_next_action(session_id: str = "") -> dict[str, Any]:
+        """Decide the single next action for an autonomous design run.
+
+        Reads the session journal and returns the next 13-stage pipeline step
+        server-side, so a client need not memorize the workflow: loop
+        "call design_next_action -> do what it says -> design_session_log the
+        result" until ``status`` is ``complete`` or ``blocked``.
+
+        Returns a dict with ``status`` (proceed | retry | blocked | complete),
+        the ``stage``, its ``goal``, ``suggested_tools`` (exact tool names),
+        the ``exit_gate`` that marks it done, and — on ``blocked`` — the
+        ``open_question`` to put to the user. Bounded retries: a stage that
+        fails repeatedly escalates to ``blocked`` instead of looping forever.
+        """
+        journal = _resolve_journal(session_id)
+        if journal is None:
+            return {"error": "no design sessions found; start one with design_session_start"}
+        from ..design.state_machine import next_action as _next_action
+        action = _next_action(journal.state())
+        return asdict(action)
+
+    @mcp.tool()
+    async def design_autonomy_guide() -> dict[str, Any]:
+        """The autonomous spec-to-board loop protocol, in one call.
+
+        Returns how to drive a full design run with the harness: the loop
+        (start session → design_next_action → execute → log → repeat), the
+        13 pipeline stages with their tools and exit gates, the hard
+        constraints, and how to resume after context loss. Read this once
+        before an autonomous run; `design_next_action` then guides each step.
+        """
+        from ..design.autonomy import autonomy_guide
+        return autonomy_guide()
+
+    # Register the MCP prompt only on a real FastMCP; test harnesses that
+    # register tools with a minimal fake mcp (``.tool()`` only, no
+    # ``.prompt()``) must not break at registration time.
+    if hasattr(mcp, "prompt"):
+        @mcp.prompt(
+            name="autonomous_design",
+            description="Drive a full spec-to-board design run with the harness.",
+        )
+        def autonomous_design_prompt(requirement: str = "") -> str:
+            """MCP prompt: the autonomous-design loop, optionally seeded with a
+            requirement. Prompt-capable clients invoke this to start a run."""
+            from ..design.autonomy import autonomy_prompt_text
+            return autonomy_prompt_text(requirement)
+
+    # --- async jobs (engine runs that outlive a tool timeout) ------------
+
+    @mcp.tool()
+    async def design_job_start(kind: str, params: dict) -> dict[str, Any]:
+        """Start a long engine run as a background job; returns its id.
+
+        For work that can exceed the MCP tool timeout (routing a dense
+        board). Poll `design_job_status`, then `design_job_result` when done.
+
+        Args:
+            kind: registered job kind. Currently: ``route`` (offline A*
+                router; ``params`` needs a ``geometry`` dict, optional
+                ``rules`` / ``net_classes`` / ``grid_pitch_mils``).
+            params: keyword arguments for the engine.
+
+        Returns:
+            ``{"job_id": ..., "kind": ...}`` or ``{"error": ...}`` for an
+            unknown kind.
+        """
+        from ..design.jobs import JOB_KINDS, get_job_store
+        if kind not in JOB_KINDS:
+            return {"error": f"unknown job kind {kind!r}; known: {sorted(JOB_KINDS)}"}
+        store = get_job_store()
+        job_id = store.submit(kind, JOB_KINDS[kind], params or {})
+        return {"job_id": job_id, "kind": kind}
+
+    @mcp.tool()
+    async def design_job_status(job_id: str = "") -> dict[str, Any]:
+        """Status of a background job (or all jobs if ``job_id`` is blank)."""
+        from ..design.jobs import get_job_store
+        store = get_job_store()
+        if not job_id:
+            return {"jobs": store.list()}
+        rec = store.status(job_id)
+        return rec if rec else {"error": f"no such job: {job_id}"}
+
+    @mcp.tool()
+    async def design_job_result(job_id: str) -> dict[str, Any]:
+        """Fetch a finished job's result payload (None until it's done)."""
+        from ..design.jobs import get_job_store
+        rec = get_job_store().result(job_id)
+        return rec if rec else {"error": f"no such job: {job_id}"}
 
     @mcp.tool()
     async def design_snapshot_inventory(
@@ -1281,6 +1489,130 @@ def register_design_tools(mcp) -> None:
                  "target_ohms": t.target_ohms, "feasible": t.feasible}
                 for t in traces
             ],
+        }
+
+    @mcp.tool()
+    async def design_review_file(path: str) -> dict[str, Any]:
+        """Offline FALLBACK review of a .SchDoc/.PrjPcb — OFF by default.
+
+        This is NOT the preferred way to review a design. It parses the
+        Altium file directly (OLE reader) with no running Altium and no
+        license, so it only covers the netlist-free, component-level subset
+        (missing MPN / datasheet / manufacturer, placeholder values,
+        designator collisions, missing / unannotated designators, incomplete
+        title block). It cannot compile a netlist or run ERC, and an offline
+        parser can misread a file.
+
+        Prefer the live-Altium tools whenever a session is available:
+        ``design_lint_report``, ``proj_run_erc``, ``design_review_snapshot``,
+        and the ``audit_*`` family run Altium's own engines and see
+        connectivity this reader cannot. Reach for this tool only when Altium
+        genuinely can't be opened (a file on disk, a CI runner).
+
+        Because of that, this surface is **disabled by default**. To enable
+        it, set the environment variable ``EDA_AGENT_HEADLESS_REVIEW=1``.
+        Without it the tool returns an ``error`` explaining the opt-in.
+
+        Args:
+            path: a ``.SchDoc`` sheet or a ``.PrjPcb`` project (reviews all
+                its sheets).
+
+        Returns the review report ``{file, component_count, findings,
+        summary, ...}`` — or ``{"error": ...}`` if disabled or unreadable.
+        """
+        from ..fileio.review import (
+            HEADLESS_DISABLED_MESSAGE,
+            headless_review_enabled,
+            review_project_file,
+        )
+        if not headless_review_enabled():
+            return {"error": HEADLESS_DISABLED_MESSAGE, "disabled": True}
+        try:
+            return review_project_file(path)
+        except (ValueError, OSError) as e:
+            return {"error": f"cannot read {path}: {e}"}
+
+    @mcp.tool()
+    async def design_solve_netlist_file(path: str) -> dict[str, Any]:
+        """Reconstruct a .SchDoc's netlist geometrically — OFF by default.
+
+        Offline FALLBACK, same opt-in as ``design_review_file``. Parses the
+        file (no Altium, no license) and rebuilds the compiled netlist from
+        geometry (pins, wires, power ports, junctions, and by-name net
+        labels), then runs connectivity ERC (``single_pin_net`` floating
+        pins, ``net_short`` rail shorts).
+
+        Prefer the live-Altium path (``proj_get_nets`` / ``proj_run_erc``)
+        whenever a session is available — Altium's own compiler is ground
+        truth. Use this only when Altium can't be opened.
+
+        Validated envelope: wire + power port + junction + net-label
+        connectivity (live Altium 24/24; pipeline buck 7/7). It faithfully
+        reports a net the schematic left floating; cross-sheet connectors are
+        out of scope. A single sheet only (a ``.SchDoc``), not a project.
+
+        Enable with ``EDA_AGENT_HEADLESS_REVIEW=1``.
+
+        Returns ``{file, net_count, nets, pin_count, findings}`` — or
+        ``{"error": ...}`` if disabled or unreadable.
+        """
+        from ..fileio.review import (
+            HEADLESS_DISABLED_MESSAGE,
+            headless_review_enabled,
+            review_connectivity,
+        )
+        if not headless_review_enabled():
+            return {"error": HEADLESS_DISABLED_MESSAGE, "disabled": True}
+        try:
+            from ..fileio.netlist_solver import solve_schematic_nets
+            solved = solve_schematic_nets(path)
+        except (ValueError, OSError, KeyError) as e:
+            return {"error": f"cannot solve {path}: {e}"}
+        return {
+            "file": str(path),
+            "net_count": len(solved["nets"]),
+            "pin_count": len(solved["pin_nets"]),
+            "nets": {name: [f"{m['component']}.{m['pin']}" for m in members]
+                     for name, members in solved["nets"].items()},
+            "findings": review_connectivity(solved),
+        }
+
+    @mcp.tool()
+    async def design_bom_file(path: str) -> dict[str, Any]:
+        """Consolidated BOM from a .SchDoc/.PrjPcb on disk — OFF by default.
+
+        Offline FALLBACK, same opt-in as ``design_review_file``. Parses the
+        Altium file directly (no Altium, no license) and groups components
+        into purchasable BOM lines — one per distinct ``(mpn, value,
+        lib_reference)``, designators grouped and naturally sorted, quantity
+        summed. A ``.PrjPcb`` aggregates all its sheets.
+
+        Prefer the live-Altium ``proj_get_bom`` / ``proj_export_bom_html``
+        when a session is available. Use this for a file on disk or a CI
+        artifact.
+
+        Enable with ``EDA_AGENT_HEADLESS_REVIEW=1``.
+
+        Returns ``{file, line_count, part_count, lines}`` where each line is
+        ``{quantity, designators, mpn, manufacturer, value, lib_reference,
+        datasheet}`` — or ``{"error": ...}`` if disabled or unreadable.
+        """
+        from ..fileio.review import (
+            HEADLESS_DISABLED_MESSAGE,
+            headless_review_enabled,
+        )
+        if not headless_review_enabled():
+            return {"error": HEADLESS_DISABLED_MESSAGE, "disabled": True}
+        try:
+            from ..fileio.bom import bom_from_file
+            lines = bom_from_file(path)
+        except (ValueError, OSError) as e:
+            return {"error": f"cannot read {path}: {e}"}
+        return {
+            "file": str(path),
+            "line_count": len(lines),
+            "part_count": sum(ln["quantity"] for ln in lines),
+            "lines": lines,
         }
 
     @mcp.tool()
