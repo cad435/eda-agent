@@ -5808,6 +5808,170 @@ Begin
         + EscapeJsonString(Path) + '"}');
 End;
 
+{ Lib_DeleteComponent - remove one symbol from a schematic library (.SchLib).  }
+{ Mirrors the overwrite path in Lib_CopyComponent: focus the lib, resolve the  }
+{ component by LibReference, RemoveSchComponent, then mark the lib dirty for    }
+{ deferred save. Deletes a single named part; hard error if the name is not    }
+{ found (no silent no-op, no wildcard mass-delete).                            }
+{ Params: component_name (required, the LibReference), library_path (optional, }
+{         defaults to the focused document).                                   }
+Function Lib_DeleteComponent(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, CompName, RespJson : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    SchLib : ISch_Lib;
+    Component : ISch_Component;
+Begin
+    LibPath := StringReplace(ExtractJsonValue(Params, 'library_path'), '\\', '\', -1);
+    CompName := ExtractJsonValue(Params, 'component_name');
+    If CompName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'component_name is required');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library is active and library_path was not supplied');
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    SchLib := SchServer.GetCurrentSchDocument;
+    If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB',
+            'Failed to focus schematic library at ' + LibPath);
+        Exit;
+    End;
+    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
+            'Component not found in ' + LibPath + ': ' + CompName);
+        Exit;
+    End;
+
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    SchLib.RemoveSchComponent(Component);
+    SchServer.ProcessControl.PostProcess(SchLib, 'Delete component');
+    MarkLibDirty(SchLib);
+
+    RespJson :=
+        '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"deleted":"' + EscapeJsonString(CompName) + '"}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Lib_DeleteFootprint - remove one footprint from a PCB library (.PcbLib).     }
+{ Finds the footprint by Name via a LibraryIterator (break BEFORE deleting to  }
+{ avoid iterator invalidation), then RemoveComponent + DeRegisterComponent per }
+{ the reference DeleteSelectedItemsInPcbLib pattern, inside PreProcess/         }
+{ PostProcess, and saves the .PcbLib. Hard error if the name is not found.     }
+{ Params: footprint_name (required), library_path (optional, focused default). }
+Function Lib_DeleteFootprint(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FpWanted, FpName, RespJson : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint, Target : IPCB_LibComponent;
+Begin
+    LibPath := StringReplace(ExtractJsonValue(Params, 'library_path'), '\\', '\', -1);
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    If FpWanted = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'footprint_name is required');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library is active and library_path was not supplied');
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'Failed to focus PCB library at ' + LibPath);
+        Exit;
+    End;
+
+    Target := Nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            Try FpName := Footprint.Name; Except End;
+            If FpName = FpWanted Then
+            Begin
+                Target := Footprint;
+                Break;
+            End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND',
+            'Footprint not found in ' + LibPath + ': ' + FpWanted);
+        Exit;
+    End;
+
+    PCBServer.PreProcess;
+    Try PcbLib.RemoveComponent(Target); Except End;
+    Try PcbLib.DeRegisterComponent(Target); Except End;
+    PCBServer.PostProcess;
+    SaveDocByPath(PcbLib.Board.FileName);
+
+    RespJson :=
+        '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"deleted":"' + EscapeJsonString(FpWanted) + '"}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
 {..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
@@ -5858,6 +6022,8 @@ Begin
         'split_pin_functions':  Result := Lib_SplitPinFunctions(Params, RequestId);
         'install_library':      Result := Lib_InstallLibrary(Params, RequestId);
         'uninstall_library':    Result := Lib_UninstallLibrary(Params, RequestId);
+        'delete_component':     Result := Lib_DeleteComponent(Params, RequestId);
+        'delete_footprint':     Result := Lib_DeleteFootprint(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;

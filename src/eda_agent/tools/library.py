@@ -2685,6 +2685,58 @@ def register_library_tools(mcp):
         )
 
     @mcp.tool()
+    async def lib_delete_component(
+        component_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Delete one symbol from a schematic library (.SchLib).
+
+        Removes the component whose LibReference is ``component_name`` and
+        marks the library dirty for deferred save (flushed by app_save_all).
+        Deletes a single named part; if the name is not found the call
+        errors (COMPONENT_NOT_FOUND) rather than silently doing nothing.
+        There is no wildcard mass-delete.
+
+        Args:
+            component_name: the component's LibReference (its library name).
+            library_path: optional absolute .SchLib path to target; defaults
+                to the currently focused library document.
+
+        Returns:
+            {"success": true, "library_path": "...", "deleted": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.delete_component",
+            {"component_name": component_name, "library_path": library_path},
+        )
+
+    @mcp.tool()
+    async def lib_delete_footprint(
+        footprint_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Delete one footprint from a PCB library (.PcbLib).
+
+        Finds the footprint by name, removes and deregisters it, then saves
+        the .PcbLib. Deletes a single named footprint; if the name is not
+        found the call errors (FOOTPRINT_NOT_FOUND). No wildcard mass-delete.
+
+        Args:
+            footprint_name: the footprint's name in the library.
+            library_path: optional absolute .PcbLib path to target; defaults
+                to the currently focused library document.
+
+        Returns:
+            {"success": true, "library_path": "...", "deleted": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.delete_footprint",
+            {"footprint_name": footprint_name, "library_path": library_path},
+        )
+
+    @mcp.tool()
     async def lib_inspect_cse_zip(zip_path: str) -> dict[str, Any]:
         """Identify the library members of a Component Search Engine zip.
 
