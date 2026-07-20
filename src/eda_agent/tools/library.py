@@ -2785,6 +2785,54 @@ def register_library_tools(mcp):
         )
 
     @mcp.tool()
+    async def lib_set_model_source(
+        component_name: str,
+        source_library: str,
+        model_name: str = "",
+        use_component_library: Optional[bool] = None,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Write the datafile-link Location (source library) on a footprint model.
+
+        A footprint whose datafile link has an empty Location resolves in the
+        SchLib editor by name but cannot embed into a self-contained compiled
+        library, so the footprint goes missing in the used/compiled output
+        even though the package's own compile reports no error. This writes
+        Location so the model is embeddable. Location is set in place (never
+        through AddDataFileLink with a path, which wedges AD26). Targets PCBLIB
+        models matching model_name, or all PCBLIB models when it is empty.
+
+        IMPORTANT: get the exact source_library string from a known-good model
+        that already embeds correctly. Read it via lib_get_component_details,
+        whose models array now shows each model's location and
+        use_component_library. This tool writes exactly what you pass; it does
+        not infer the format.
+
+        Args:
+            component_name: the component's LibReference.
+            source_library: the source-library reference written into Location.
+            model_name: optional footprint model name to target one model.
+            use_component_library: optional; sets the embed-vs-search flag.
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "component": "...", "source_library": "...",
+             "models_updated": N}.
+        """
+        params: dict[str, Any] = {
+            "component_name": component_name,
+            "source_library": source_library,
+            "model_name": model_name,
+            "library_path": library_path,
+        }
+        if use_component_library is not None:
+            params["use_component_library"] = (
+                "true" if use_component_library else "false"
+            )
+        bridge = get_bridge()
+        return await bridge.send_command_async("library.set_model_source", params)
+
+    @mcp.tool()
     async def lib_remove_model(
         component_name: str,
         model_name: str,
@@ -2854,6 +2902,8 @@ def register_library_tools(mcp):
         library_path: str = "",
         rename_map: Optional[dict[str, str]] = None,
         dedupe_only: bool = False,
+        source_library: str = "",
+        use_component_library: Optional[bool] = None,
     ) -> dict[str, Any]:
         """Clean up every component's models in a SchLib for a self-contained package.
 
@@ -2866,6 +2916,13 @@ def register_library_tools(mcp):
         rename_map; and repairs any footprint (PCBLIB) left with no datafile
         link. It does NOT destroy and rebuild implementations, so nothing on a
         model is lost.
+
+        With source_library set, it also writes that value into the Location
+        of every PCBLIB model's datafile link, turning a name-only library
+        (footprints resolve but do not embed) into an embeddable one in the
+        same pass. Existing Locations are only overwritten when source_library
+        is given; they are never blanked. Get the exact string from a
+        known-good model first (see lib_set_model_source).
 
         Note: it preserves what is present; it cannot resurrect data a prior
         broken run already dropped. If a library was damaged by an earlier
@@ -2880,20 +2937,29 @@ def register_library_tools(mcp):
             rename_map: optional {old_model_name: new_model_name} applied to
                 the kept model's name and matching datafile entity.
             dedupe_only: skip renames; only collapse duplicates + clear source.
+            source_library: optional; when set, written into every PCBLIB
+                model's datafile Location so footprints embed on compile.
+            use_component_library: optional; sets the embed-vs-search flag on
+                the models whose Location is written.
 
         Returns:
             {"success": true, "components_touched": N, "duplicates_removed": N,
-             "sources_cleared": N, "links_repaired": N}.
+             "sources_cleared": N, "links_repaired": N, "sources_set": N}.
         """
         pairs = ";".join(f"{k}={v}" for k, v in (rename_map or {}).items())
+        params: dict[str, Any] = {
+            "library_path": library_path,
+            "rename_map": pairs,
+            "dedupe_only": "true" if dedupe_only else "false",
+            "source_library": source_library,
+        }
+        if use_component_library is not None:
+            params["use_component_library"] = (
+                "true" if use_component_library else "false"
+            )
         bridge = get_bridge()
         return await bridge.send_command_async(
-            "library.normalize_implementations",
-            {
-                "library_path": library_path,
-                "rename_map": pairs,
-                "dedupe_only": "true" if dedupe_only else "false",
-            },
+            "library.normalize_implementations", params
         )
 
     @mcp.tool()

@@ -38,7 +38,7 @@ Var
     Impl : ISch_Implementation;
     Link : ISch_ModelDatafileLink;
     ModelName, ModelType, LinksJson, Entity, FileKind, Loc, ModelsJson : String;
-    IsCur, First, LinkFirst : Boolean;
+    IsCur, First, LinkFirst, UseLib : Boolean;
     J, LinkCount : Integer;
 Begin
     Result := '[]';
@@ -58,6 +58,8 @@ Begin
             Try ModelName := Impl.ModelName; Except End;
             Try ModelType := Impl.ModelType; Except End;
             Try IsCur := Impl.IsCurrent; Except End;
+            UseLib := True;
+            Try UseLib := Impl.UseComponentLibrary; Except End;
 
             LinksJson := '[';
             LinkFirst := True;
@@ -89,6 +91,7 @@ Begin
                 '{"model_name":"' + EscapeJsonString(ModelName) + '"' +
                 ',"model_type":"' + EscapeJsonString(ModelType) + '"' +
                 ',"is_current":' + BoolToJsonStr(IsCur) +
+                ',"use_component_library":' + BoolToJsonStr(UseLib) +
                 ',"datafile_links":' + LinksJson + '}';
 
             Impl := ImplIter.NextSchObject;
@@ -6431,14 +6434,16 @@ Var
     Impl, Found : ISch_Implementation;
     Link : ISch_ModelDatafileLink;
     CompNames, AllKeys, AllCurs, SeenKeys : TStringList;
-    ModelName, ModelType, Key, NewName, Nm, OldSrc, EntNm : String;
+    ModelName, ModelType, Key, NewName, Nm, OldSrc, EntNm, SourceLib, UseLibStr : String;
     C, J, K, Guard, LinkCount : Integer;
-    CompsTouched, DupsRemoved, SourcesCleared, LinksRepaired : Integer;
+    CompsTouched, DupsRemoved, SourcesCleared, LinksRepaired, SourcesSet : Integer;
 Begin
     LibPath := ExtractJsonValue(Params, 'library_path');
     RenameMap := ExtractJsonValue(Params, 'rename_map');
     DedupeStr := ExtractJsonValue(Params, 'dedupe_only');
     DedupeOnly := (DedupeStr = 'true') Or (DedupeStr = 'True') Or (DedupeStr = '1');
+    SourceLib := ExtractJsonValue(Params, 'source_library');
+    UseLibStr := ExtractJsonValue(Params, 'use_component_library');
 
     SchLib := FocusSchLib(LibPath);
     If SchLib = Nil Then
@@ -6470,6 +6475,7 @@ Begin
         DupsRemoved := 0;
         SourcesCleared := 0;
         LinksRepaired := 0;
+        SourcesSet := 0;
         SchServer.ProcessControl.PreProcess(SchLib, '');
 
         For C := 0 To CompNames.Count - 1 Do
@@ -6600,7 +6606,23 @@ Begin
                             If LinkCount = 0 Then
                             Begin
                                 Try Impl.AddDataFileLink(ModelName, '', 'PCBLib'); Except End;
+                                LinkCount := 0;
+                                Try LinkCount := Impl.DatafileLinkCount; Except End;
                                 Inc(LinksRepaired);
+                            End;
+                            { Populate the source-library Location so the         }
+                            { footprint embeds on compile (empty resolves by name }
+                            { but never embeds). Only when source_library is set;  }
+                            { existing Locations are otherwise left untouched.     }
+                            If SourceLib <> '' Then
+                            Begin
+                                SchBeginModify(Impl);
+                                For J := 0 To LinkCount - 1 Do
+                                    Try Impl.DatafileLink[J].Location := SourceLib; Except End;
+                                If UseLibStr = 'true' Then Try Impl.UseComponentLibrary := True; Except End;
+                                If UseLibStr = 'false' Then Try Impl.UseComponentLibrary := False; Except End;
+                                SchEndModify(Impl);
+                                Inc(SourcesSet);
                             End;
                         End;
 
@@ -6627,7 +6649,94 @@ Begin
         + ',"components_touched":' + IntToStr(CompsTouched)
         + ',"duplicates_removed":' + IntToStr(DupsRemoved)
         + ',"sources_cleared":' + IntToStr(SourcesCleared)
-        + ',"links_repaired":' + IntToStr(LinksRepaired) + '}';
+        + ',"links_repaired":' + IntToStr(LinksRepaired)
+        + ',"sources_set":' + IntToStr(SourcesSet) + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Lib_SetModelSource - write the datafile-link Location (source-library ref) on }
+{ a component's footprint models, so the footprint is EMBEDDABLE in a            }
+{ self-contained compiled library. An empty Location resolves in the editor by  }
+{ name but cannot embed on compile. Sets Location IN PLACE (never AddDataFileLink}
+{ with a path, which wedges AD26). Targets PCBLIB models matching model_name if  }
+{ given, else all. Optional use_component_library ('true'/'false') sets the      }
+{ embed-vs-search flag. Verify the exact Location string + flag against a        }
+{ known-good reference model before bulk use.                                    }
+{ Params: component_name, source_library (required), model_name (optional),      }
+{         use_component_library (optional), library_path (optional).             }
+Function Lib_SetModelSource(Params : String; RequestId : String) : String;
+Var
+    LibPath, CompName, SourceLib, ModelName, UseLibStr, RespJson, CurName, MT : String;
+    SchLib : ISch_Lib;
+    Component : ISch_Component;
+    ImplIter : ISch_Iterator;
+    Impl : ISch_Implementation;
+    Updated, J, LinkCount : Integer;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    CompName := ExtractJsonValue(Params, 'component_name');
+    SourceLib := ExtractJsonValue(Params, 'source_library');
+    ModelName := ExtractJsonValue(Params, 'model_name');
+    UseLibStr := ExtractJsonValue(Params, 'use_component_library');
+    If CompName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'component_name is required');
+        Exit;
+    End;
+    SchLib := FocusSchLib(LibPath);
+    If SchLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active and library_path did not resolve');
+        Exit;
+    End;
+    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+    If Component = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND', 'Component not found in ' + LibPath + ': ' + CompName);
+        Exit;
+    End;
+
+    Updated := 0;
+    SchServer.ProcessControl.PreProcess(SchLib, '');
+    ImplIter := Component.SchIterator_Create;
+    Try
+        ImplIter.AddFilter_ObjectSet(MkSet(eImplementation));
+        Impl := ImplIter.FirstSchObject;
+        While Impl <> Nil Do
+        Begin
+            MT := '';
+            CurName := '';
+            Try MT := Impl.ModelType; Except End;
+            Try CurName := Impl.ModelName; Except End;
+            If (UpperCase(MT) = 'PCBLIB') And ((ModelName = '') Or (CurName = ModelName)) Then
+            Begin
+                SchBeginModify(Impl);
+                LinkCount := 0;
+                Try LinkCount := Impl.DatafileLinkCount; Except End;
+                If LinkCount = 0 Then
+                Begin
+                    Try Impl.AddDataFileLink(CurName, '', 'PCBLib'); Except End;
+                    LinkCount := 0;
+                    Try LinkCount := Impl.DatafileLinkCount; Except End;
+                End;
+                For J := 0 To LinkCount - 1 Do
+                    Try Impl.DatafileLink[J].Location := SourceLib; Except End;
+                If UseLibStr = 'true' Then Try Impl.UseComponentLibrary := True; Except End;
+                If UseLibStr = 'false' Then Try Impl.UseComponentLibrary := False; Except End;
+                SchEndModify(Impl);
+                Inc(Updated);
+            End;
+            Impl := ImplIter.NextSchObject;
+        End;
+    Finally
+        Component.SchIterator_Destroy(ImplIter);
+    End;
+    SchServer.ProcessControl.PostProcess(SchLib, 'Set model source');
+    MarkLibDirty(SchLib);
+
+    RespJson := '{"success":true,"component":"' + EscapeJsonString(CompName) + '"'
+        + ',"source_library":"' + EscapeJsonString(SourceLib) + '"'
+        + ',"models_updated":' + IntToStr(Updated) + '}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
@@ -6686,6 +6795,7 @@ Begin
         'remove_model':         Result := Lib_RemoveModel(Params, RequestId);
         'rename_footprint':     Result := Lib_RenameFootprint(Params, RequestId);
         'set_model_name':       Result := Lib_SetModelName(Params, RequestId);
+        'set_model_source':     Result := Lib_SetModelSource(Params, RequestId);
         'normalize_implementations': Result := Lib_NormalizeImplementations(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
