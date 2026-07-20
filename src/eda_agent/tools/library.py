@@ -1556,6 +1556,7 @@ def register_library_tools(mcp):
         component_name: str,
         footprint_name: str,
         footprint_library: str = "",
+        replace: bool = True,
     ) -> dict[str, Any]:
         """Link a footprint to a schematic component.
 
@@ -1563,11 +1564,18 @@ def register_library_tools(mcp):
         component_name. Open/focus the target component in the SchLib editor
         before calling this.
 
+        With replace=True (the default) any existing footprint (PCBLIB) model
+        on the component is removed first, so re-linking replaces rather than
+        appends. Pass replace=False to keep prior footprint models and add
+        another (the old append behaviour, which bloats a component with
+        duplicate models).
+
         Args:
             component_name: Name of the schematic component (currently ignored,
                 see note above)
             footprint_name: Name of the footprint to link
             footprint_library: Library containing the footprint (optional if same library)
+            replace: remove existing footprint models before adding (default True)
 
         Returns:
             Dictionary confirming link
@@ -1579,6 +1587,7 @@ def register_library_tools(mcp):
                 "component_name": component_name,
                 "footprint_name": footprint_name,
                 "library_name": footprint_library,
+                "replace": "true" if replace else "false",
             },
         )
         return result
@@ -1876,6 +1885,12 @@ def register_library_tools(mcp):
               - parameter_styles: list of {name, value, style:{font_id,
                 color, is_hidden, x, y, orientation, justification}}
                 in the same order parameters appear on the symbol.
+              - models: list of the component's implementations (footprint
+                / SPICE / 3D links), each {model_name, model_type,
+                is_current, datafile_links:[{entity_name, file_kind,
+                location}]}. datafile_links is the model's source (the
+                library it resolves from); empty when the footprint binds
+                by name only. Empty list when the part carries no models.
               - `_datasheet_guidance` + `_datasheet_parts`.
         """
         bridge = get_bridge()
@@ -2734,6 +2749,151 @@ def register_library_tools(mcp):
         return await bridge.send_command_async(
             "library.delete_footprint",
             {"footprint_name": footprint_name, "library_path": library_path},
+        )
+
+    @mcp.tool()
+    async def lib_set_model_name(
+        component_name: str,
+        new_model_name: str,
+        model_name: str = "",
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Set a model's model_name (footprint reference) on a SchLib symbol.
+
+        Rewrites the ModelName of one of the component's implementations.
+        If model_name is given, the model whose current ModelName matches is
+        targeted; otherwise the current (or first) model is used.
+
+        Args:
+            component_name: the component's LibReference.
+            new_model_name: the new model_name to write.
+            model_name: optional current model_name to target a specific one.
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "component": "...", "new_model_name": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_model_name",
+            {
+                "component_name": component_name,
+                "new_model_name": new_model_name,
+                "model_name": model_name,
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
+    async def lib_remove_model(
+        component_name: str,
+        model_name: str,
+        keep_one: bool = False,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Remove models (implementations) from a SchLib component by name.
+
+        Removes every implementation whose ModelName equals model_name. With
+        keep_one=True it keeps the first match and removes the rest, which
+        deletes duplicate model links while preserving one. Errors if the
+        component is not found; returns removed=0 if no model matches.
+
+        Args:
+            component_name: the component's LibReference.
+            model_name: the ModelName of the model(s) to remove.
+            keep_one: keep the first match and remove the rest (dedup).
+            library_path: optional .SchLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "model_name": "...", "removed": N,
+             "kept_one": bool}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.remove_model",
+            {
+                "component_name": component_name,
+                "model_name": model_name,
+                "keep_one": "true" if keep_one else "false",
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
+    async def lib_rename_footprint(
+        footprint_name: str,
+        new_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Rename a footprint in a PCB library (.PcbLib).
+
+        Renames the footprint whose name is footprint_name to new_name.
+        Errors if footprint_name is not found or new_name already exists in
+        the library. Saves the .PcbLib.
+
+        Args:
+            footprint_name: the current footprint name.
+            new_name: the new footprint name.
+            library_path: optional .PcbLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "footprint": "...", "new_name": "..."}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.rename_footprint",
+            {
+                "footprint_name": footprint_name,
+                "new_name": new_name,
+                "library_path": library_path,
+            },
+        )
+
+    @mcp.tool()
+    async def lib_normalize_implementations(
+        library_path: str = "",
+        rename_map: Optional[dict[str, str]] = None,
+        dedupe_only: bool = False,
+    ) -> dict[str, Any]:
+        """Clean up every component's models in a SchLib for a self-contained package.
+
+        Whole-library sweep. Per component it: clears the component-level
+        provenance (SourceLibraryName, TargetFileName); collapses duplicate
+        models, keeping ONE per (model_type, model_name) IN PLACE so the kept
+        model's parameters, MapAsString pin-map, and datafile link are all
+        preserved; re-flags the survivor current if any duplicate was;
+        optionally renames a model's name and its datafile entity via
+        rename_map; and repairs any footprint (PCBLIB) left with no datafile
+        link. It does NOT destroy and rebuild implementations, so nothing on a
+        model is lost.
+
+        Note: it preserves what is present; it cannot resurrect data a prior
+        broken run already dropped. If a library was damaged by an earlier
+        version, restore the backup and run this on it.
+
+        If you are also renaming footprint entities, run lib_rename_footprint
+        on the PcbLib first, then pass the same {old: new} as rename_map so
+        symbol and footprint stay matched.
+
+        Args:
+            library_path: optional .SchLib path; defaults to the focused lib.
+            rename_map: optional {old_model_name: new_model_name} applied to
+                the kept model's name and matching datafile entity.
+            dedupe_only: skip renames; only collapse duplicates + clear source.
+
+        Returns:
+            {"success": true, "components_touched": N, "duplicates_removed": N,
+             "sources_cleared": N, "links_repaired": N}.
+        """
+        pairs = ";".join(f"{k}={v}" for k, v in (rename_map or {}).items())
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.normalize_implementations",
+            {
+                "library_path": library_path,
+                "rename_map": pairs,
+                "dedupe_only": "true" if dedupe_only else "false",
+            },
         )
 
     @mcp.tool()
