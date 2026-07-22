@@ -2652,6 +2652,172 @@ def register_library_tools(mcp):
         return result
 
     @mcp.tool()
+    async def lib_copy_footprint(
+        source_name: str,
+        new_name: str = "",
+        source_library: str = "",
+        dest_library: str = "",
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Copy one footprint (all pads/primitives) into a PcbLib, optionally renaming.
+
+        Footprint analog of lib_copy_component: full-copies the footprint with
+        no delete. source_library defaults to the focused PcbLib; dest_library
+        defaults to the source. A same-library copy requires a different
+        new_name. Errors if new_name already exists in dest unless overwrite.
+
+        Args:
+            source_name: the footprint to copy.
+            new_name: name for the copy (default source_name).
+            source_library: source .PcbLib path (default the focused lib).
+            dest_library: destination .PcbLib path (default source).
+            overwrite: replace a same-named footprint already in dest.
+
+        Returns:
+            {"success": true, "source": "...", "new_name": "...",
+             "same_library": bool}.
+        """
+        params: dict[str, Any] = {"source_name": source_name}
+        if new_name:
+            params["new_name"] = new_name
+        if source_library:
+            params["source_library"] = source_library
+        if dest_library:
+            params["dest_library"] = dest_library
+        if overwrite:
+            params["overwrite"] = "true"
+        bridge = get_bridge()
+        return await bridge.send_command_async("library.copy_footprint", params)
+
+    @mcp.tool()
+    async def lib_move_components(
+        source_schlib: str,
+        dest_schlib: str,
+        names: Optional[list[str]] = None,
+        name_regex: str = "",
+        delete_from_source: bool = True,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Move matching components (symbol + params + models) between SchLibs.
+
+        Bulk analog of lib_copy_component: copies every matching component from
+        source_schlib to dest_schlib (Replicate carries the whole symbol, its
+        parameters and its models) in one pass, then removes them from source
+        unless delete_from_source is False. This is the piece that makes a full
+        library split a single call.
+
+        Provide either names (explicit LibReferences) or name_regex (matched
+        against the source's component names). With names it is one IPC call;
+        with name_regex the source component list is fetched first to resolve
+        the matches, then the move runs. A component already present in dest is
+        skipped unless overwrite=True.
+
+        Args:
+            source_schlib: source .SchLib path.
+            dest_schlib: destination .SchLib path.
+            names: explicit list of component LibReferences to move.
+            name_regex: regex matched against source component names when names
+                is not given.
+            delete_from_source: remove moved components from source (default True).
+            overwrite: replace a same-named component already in dest.
+
+        Returns:
+            {"success": true, "moved": N, "skipped": N, "failed": N}.
+        """
+        resolved: list[str] = list(names or [])
+        if not resolved and name_regex:
+            import re
+
+            listing = await get_bridge().send_command_async(
+                "library.get_components", {"library_path": source_schlib}
+            )
+            comps = (listing or {}).get("components") or []
+            pat = re.compile(name_regex)
+            for c in comps:
+                nm = c.get("name") or c.get("lib_ref") or ""
+                if nm and pat.search(nm):
+                    resolved.append(nm)
+        if not resolved:
+            return {
+                "error": "no components to move: provide names[] or a "
+                "name_regex that matches at least one source component"
+            }
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.move_components",
+            {
+                "source_library": source_schlib,
+                "dest_library": dest_schlib,
+                "names": "~~".join(resolved),
+                "delete_from_source": "true" if delete_from_source else "false",
+                "overwrite": "true" if overwrite else "false",
+            },
+        )
+
+    @mcp.tool()
+    async def lib_move_footprints(
+        source_pcblib: str,
+        dest_pcblib: str,
+        names: Optional[list[str]] = None,
+        name_regex: str = "",
+        delete_from_source: bool = True,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Move matching footprints between PcbLibs (the PcbLib analog of move).
+
+        Copies every matching footprint (all pads and primitives, via a full
+        copy) from source_pcblib to dest_pcblib, then removes them from source
+        unless delete_from_source is False. The footprint counterpart of
+        lib_move_components; together they split a full library.
+
+        Provide either names (explicit footprint names) or name_regex (matched
+        against the source's footprint names). With names it is one IPC call;
+        with name_regex the source footprint list is fetched first. A footprint
+        already present in dest is skipped unless overwrite=True.
+
+        Args:
+            source_pcblib: source .PcbLib path.
+            dest_pcblib: destination .PcbLib path.
+            names: explicit list of footprint names to move.
+            name_regex: regex matched against source footprint names when names
+                is not given.
+            delete_from_source: remove moved footprints from source (default True).
+            overwrite: replace a same-named footprint already in dest.
+
+        Returns:
+            {"success": true, "moved": N, "skipped": N, "failed": N}.
+        """
+        resolved: list[str] = list(names or [])
+        if not resolved and name_regex:
+            import re
+
+            listing = await get_bridge().send_command_async(
+                "library.get_footprints", {"library_path": source_pcblib}
+            )
+            fps = (listing or {}).get("footprints") or []
+            pat = re.compile(name_regex)
+            for f in fps:
+                nm = f.get("name") or ""
+                if nm and pat.search(nm):
+                    resolved.append(nm)
+        if not resolved:
+            return {
+                "error": "no footprints to move: provide names[] or a "
+                "name_regex that matches at least one source footprint"
+            }
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.move_footprints",
+            {
+                "source_library": source_pcblib,
+                "dest_library": dest_pcblib,
+                "names": "~~".join(resolved),
+                "delete_from_source": "true" if delete_from_source else "false",
+                "overwrite": "true" if overwrite else "false",
+            },
+        )
+
+    @mcp.tool()
     async def lib_split_pin_functions() -> dict[str, Any]:
         """Split slash-delimited pin names into pin function lists.
 
@@ -2895,6 +3061,35 @@ def register_library_tools(mcp):
                 "new_name": new_name,
                 "library_path": library_path,
             },
+        )
+
+    @mcp.tool()
+    async def lib_probe_footprint(
+        footprint_name: str,
+        library_path: str = "",
+    ) -> dict[str, Any]:
+        """Read-only dump of a PcbLib footprint's name-bearing fields.
+
+        Use this to locate where an old name persists after a rename. On a
+        PcbLib footprint, Name and Pattern are the SAME property (renaming Name
+        writes both), and the footprint's only metadata is Name, Description,
+        Height. So a leftover old name lives in a child primitive: this returns
+        every text primitive's object_id and text, plus name/description/
+        height_mils/primitive_count. Nothing is written.
+
+        Args:
+            footprint_name: the footprint name.
+            library_path: optional .PcbLib path; defaults to the focused lib.
+
+        Returns:
+            {"success": true, "footprint": "...", "description": "...",
+             "height_mils": N, "primitive_count": N,
+             "texts": [{"object_id": N, "text": "..."}]}.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.probe_footprint",
+            {"footprint_name": footprint_name, "library_path": library_path},
         )
 
     @mcp.tool()

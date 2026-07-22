@@ -6740,6 +6740,487 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
+{ Lib_ProbeFootprint - READ-ONLY dump of a PcbLib footprint's name-bearing      }
+{ fields, to locate where an old name persists after a rename. On IPCB_LibComp   }
+{ Name and Pattern are the SAME property (Name := new writes both); its only     }
+{ metadata is Name, Description, Height. So a stale name lives in a child        }
+{ primitive: this dumps every primitive's ObjectId and, for text objects, its    }
+{ .Text, so the offending record is visible. Nothing is written.                 }
+{ Params: footprint_name (required), library_path (optional).                    }
+Function Lib_ProbeFootprint(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FpWanted, FpName, FpDescr, PrimsJson, RespJson, TxtVal : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint, Target : IPCB_LibComponent;
+    GrpIter : IPCB_GroupIterator;
+    Prim : IPCB_Primitive;
+    Txt : IPCB_Text;
+    HeightMils, PrimCount : Integer;
+    PFirst : Boolean;
+Begin
+    LibPath := StringReplace(ExtractJsonValue(Params, 'library_path'), '\\', '\', -1);
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    If FpWanted = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'footprint_name is required');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY', 'No library is active and library_path was not supplied');
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to focus PCB library at ' + LibPath);
+        Exit;
+    End;
+
+    Target := Nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            Try FpName := Footprint.Name; Except End;
+            If FpName = FpWanted Then Begin Target := Footprint; Break; End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND', 'Footprint not found in ' + LibPath + ': ' + FpWanted);
+        Exit;
+    End;
+
+    FpName := '';
+    FpDescr := '';
+    HeightMils := 0;
+    Try FpName := Target.Name; Except End;
+    Try FpDescr := Target.Description; Except End;
+    Try HeightMils := CoordToMils(Target.Height); Except End;
+
+    PrimsJson := '[';
+    PFirst := True;
+    PrimCount := 0;
+    GrpIter := Target.GroupIterator_Create;
+    Try
+        Prim := GrpIter.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            Inc(PrimCount);
+            TxtVal := '';
+            If Prim.ObjectId = eTextObject Then
+            Begin
+                Txt := Prim;
+                Try TxtVal := Txt.Text; Except End;
+            End;
+            If TxtVal <> '' Then
+            Begin
+                If Not PFirst Then PrimsJson := PrimsJson + ',';
+                PFirst := False;
+                PrimsJson := PrimsJson + '{"object_id":' + IntToStr(Prim.ObjectId)
+                    + ',"text":"' + EscapeJsonString(TxtVal) + '"}';
+            End;
+            Prim := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Target.GroupIterator_Destroy(GrpIter);
+    End;
+    PrimsJson := PrimsJson + ']';
+
+    RespJson := '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"'
+        + ',"footprint":"' + EscapeJsonString(FpName) + '"'
+        + ',"description":"' + EscapeJsonString(FpDescr) + '"'
+        + ',"height_mils":' + IntToStr(HeightMils)
+        + ',"primitive_count":' + IntToStr(PrimCount)
+        + ',"texts":' + PrimsJson + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Lib_MoveComponents - bulk copy (+ optional delete) of components between two  }
+{ SchLibs, the bulk analog of Lib_CopyComponent. Replicate carries the whole     }
+{ symbol (pins, parameters, models). Focuses SOURCE once (Replicate needs source }
+{ context) and addresses DEST by path via GetSchDocumentByPath, so there is no   }
+{ per-component focus thrashing. Names arrive as a '~~'-separated explicit list   }
+{ (the Python tool resolves any regex first). A name already in dest is skipped  }
+{ unless overwrite. delete_from_source defaults true. Names collected up front,   }
+{ so removing from source never mutates a live iterator.                         }
+{ Params: source_library, dest_library, names ('~~'-sep, required), overwrite,   }
+{         delete_from_source.                                                    }
+Function Lib_MoveComponents(Params : String; RequestId : String) : String;
+Var
+    SourcePath, DestPath, NamesStr, Remaining, Name, OverwriteStr, DeleteStr, RespJson : String;
+    Overwrite, DeleteFromSource : Boolean;
+    SourceLib, DestLib : ISch_Lib;
+    SourceComp, NewComp, Existing : ISch_Component;
+    ServerDoc : IServerDocument;
+    Moved, Skipped, Failed : Integer;
+Begin
+    SourcePath := StringReplace(ExtractJsonValue(Params, 'source_library'), '\\', '\', -1);
+    DestPath := StringReplace(ExtractJsonValue(Params, 'dest_library'), '\\', '\', -1);
+    NamesStr := ExtractJsonValue(Params, 'names');
+    OverwriteStr := ExtractJsonValue(Params, 'overwrite');
+    DeleteStr := ExtractJsonValue(Params, 'delete_from_source');
+    Overwrite := (OverwriteStr = 'true') Or (OverwriteStr = 'True') Or (OverwriteStr = '1');
+    DeleteFromSource := (DeleteStr = '') Or (DeleteStr = 'true') Or (DeleteStr = 'True') Or (DeleteStr = '1');
+
+    If (SourcePath = '') Or (DestPath = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'source_library and dest_library are required');
+        Exit;
+    End;
+    If NamesStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'names is required');
+        Exit;
+    End;
+    If UpperCase(SourcePath) = UpperCase(DestPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SAME_LIBRARY', 'source_library and dest_library are the same');
+        Exit;
+    End;
+
+    { Open dest (load it), then focus source so Replicate has its context. }
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', DestPath);
+    RunProcess('WorkspaceManager:OpenObject');
+
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', SourcePath);
+    RunProcess('WorkspaceManager:OpenObject');
+
+    SourceLib := SchServer.GetCurrentSchDocument;
+    If (SourceLib = Nil) Or (SourceLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'Failed to focus source library at ' + SourcePath);
+        Exit;
+    End;
+    DestLib := SchServer.GetSchDocumentByPath(DestPath);
+    If (DestLib = Nil) Or (DestLib.ObjectId <> eSchLib) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'Failed to open destination library at ' + DestPath);
+        Exit;
+    End;
+
+    Moved := 0;
+    Skipped := 0;
+    Failed := 0;
+    Remaining := NamesStr;
+    While True Do
+    Begin
+        Name := NextBatchOp(Remaining);
+        If Name = '' Then Break;
+
+        SourceComp := SourceLib.GetState_SchComponentByLibRef(Name);
+        If SourceComp = Nil Then Begin Inc(Failed); Continue; End;
+
+        Existing := DestLib.GetState_SchComponentByLibRef(Name);
+        If (Existing <> Nil) And (Not Overwrite) Then Begin Inc(Skipped); Continue; End;
+
+        NewComp := SourceComp.Replicate;
+        If NewComp = Nil Then Begin Inc(Failed); Continue; End;
+        NewComp.LibReference := Name;
+
+        SchServer.ProcessControl.PreProcess(DestLib, '');
+        If Existing <> Nil Then Try DestLib.RemoveSchComponent(Existing); Except End;
+        DestLib.AddSchComponent(NewComp);
+        SchServer.ProcessControl.PostProcess(DestLib, 'Move component');
+
+        If DeleteFromSource Then
+        Begin
+            SchServer.ProcessControl.PreProcess(SourceLib, '');
+            Try SourceLib.RemoveSchComponent(SourceComp); Except End;
+            SchServer.ProcessControl.PostProcess(SourceLib, 'Move component');
+        End;
+
+        Inc(Moved);
+    End;
+
+    { Dirty both docs BY PATH (MarkLibDirty only dirties the focused doc). }
+    Try
+        ServerDoc := Client.GetDocumentByPath(DestPath);
+        If ServerDoc <> Nil Then ServerDoc.SetModified(True);
+    Except End;
+    If DeleteFromSource Then
+        Try
+            ServerDoc := Client.GetDocumentByPath(SourcePath);
+            If ServerDoc <> Nil Then ServerDoc.SetModified(True);
+        Except End;
+
+    RespJson := '{"success":true'
+        + ',"source_library":"' + EscapeJsonString(SourcePath) + '"'
+        + ',"dest_library":"' + EscapeJsonString(DestPath) + '"'
+        + ',"moved":' + IntToStr(Moved)
+        + ',"skipped":' + IntToStr(Skipped)
+        + ',"failed":' + IntToStr(Failed) + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Lib_MoveFootprints - bulk copy (+ optional delete) of footprints between two  }
+{ PcbLibs, the PcbLib analog of Lib_MoveComponents. Uses the canonical combine   }
+{ pattern: DestLib.CreateNewComponent + Footprint.CopyTo(NewFP, eFullCopy) +     }
+{ RegisterComponent, then RemoveComponent + DeRegisterComponent on the source.   }
+{ Both libraries are resolved by path (GetPCBLibraryByPath, load if needed), so  }
+{ neither needs to be focused. A name already in dest is skipped unless          }
+{ overwrite. delete_from_source defaults true. Names arrive '~~'-separated.      }
+{ Params: source_library, dest_library, names (required), overwrite,            }
+{         delete_from_source.                                                    }
+Function Lib_MoveFootprints(Params : String; RequestId : String) : String;
+Var
+    SourcePath, DestPath, NamesStr, Remaining, Name, OverwriteStr, DeleteStr, RespJson, FpName : String;
+    Overwrite, DeleteFromSource : Boolean;
+    SourceLib, DestLib : IPCB_Library;
+    Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
+    Moved, Skipped, Failed, J : Integer;
+Begin
+    SourcePath := StringReplace(ExtractJsonValue(Params, 'source_library'), '\\', '\', -1);
+    DestPath := StringReplace(ExtractJsonValue(Params, 'dest_library'), '\\', '\', -1);
+    NamesStr := ExtractJsonValue(Params, 'names');
+    OverwriteStr := ExtractJsonValue(Params, 'overwrite');
+    DeleteStr := ExtractJsonValue(Params, 'delete_from_source');
+    Overwrite := (OverwriteStr = 'true') Or (OverwriteStr = 'True') Or (OverwriteStr = '1');
+    DeleteFromSource := (DeleteStr = '') Or (DeleteStr = 'true') Or (DeleteStr = 'True') Or (DeleteStr = '1');
+
+    If (SourcePath = '') Or (DestPath = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'source_library and dest_library are required');
+        Exit;
+    End;
+    If NamesStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'names is required');
+        Exit;
+    End;
+    If UpperCase(SourcePath) = UpperCase(DestPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SAME_LIBRARY', 'source_library and dest_library are the same');
+        Exit;
+    End;
+
+    SourceLib := Nil;
+    Try SourceLib := PCBServer.GetPCBLibraryByPath(SourcePath); Except End;
+    If SourceLib = Nil Then Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourcePath); Except End;
+    If SourceLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open source PCB library at ' + SourcePath);
+        Exit;
+    End;
+    DestLib := Nil;
+    Try DestLib := PCBServer.GetPCBLibraryByPath(DestPath); Except End;
+    If DestLib = Nil Then Try DestLib := PCBServer.LoadPCBLibraryByPath(DestPath); Except End;
+    If DestLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestPath);
+        Exit;
+    End;
+
+    Moved := 0;
+    Skipped := 0;
+    Failed := 0;
+    PCBServer.PreProcess;
+    Remaining := NamesStr;
+    While True Do
+    Begin
+        Name := NextBatchOp(Remaining);
+        If Name = '' Then Break;
+
+        { Find the source footprint by name (index scan; not a live iterator). }
+        Footprint := Nil;
+        For J := 0 To SourceLib.ComponentCount - 1 Do
+        Begin
+            Fp := SourceLib.GetComponent(J);
+            FpName := '';
+            If Fp <> Nil Then Try FpName := Fp.Name; Except End;
+            If FpName = Name Then Begin Footprint := Fp; Break; End;
+        End;
+        If Footprint = Nil Then Begin Inc(Failed); Continue; End;
+
+        Existing := DestLib.GetComponentByName(Name);
+        If (Existing <> Nil) And (Not Overwrite) Then Begin Inc(Skipped); Continue; End;
+        If Existing <> Nil Then
+        Begin
+            Try DestLib.RemoveComponent(Existing); Except End;
+            Try DestLib.DeRegisterComponent(Existing); Except End;
+        End;
+
+        NewFP := DestLib.CreateNewComponent;
+        If NewFP = Nil Then Begin Inc(Failed); Continue; End;
+        Try Footprint.CopyTo(NewFP, eFullCopy); Except End;
+        Try NewFP.Name := Name; Except End;
+        DestLib.RegisterComponent(NewFP);
+
+        If DeleteFromSource Then
+        Begin
+            Try SourceLib.RemoveComponent(Footprint); Except End;
+            Try SourceLib.DeRegisterComponent(Footprint); Except End;
+        End;
+
+        Inc(Moved);
+    End;
+    PCBServer.PostProcess;
+
+    Try DestLib.Board.ViewManager_FullUpdate; Except End;
+    Try DestLib.RefreshView; Except End;
+    SaveDocByPath(DestLib.Board.FileName);
+    If DeleteFromSource Then SaveDocByPath(SourceLib.Board.FileName);
+
+    RespJson := '{"success":true'
+        + ',"source_library":"' + EscapeJsonString(SourcePath) + '"'
+        + ',"dest_library":"' + EscapeJsonString(DestPath) + '"'
+        + ',"moved":' + IntToStr(Moved)
+        + ',"skipped":' + IntToStr(Skipped)
+        + ',"failed":' + IntToStr(Failed) + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
+{ Lib_CopyFootprint - copy ONE footprint (all pads/primitives) by name into a   }
+{ PcbLib, optionally renaming, the footprint analog of Lib_CopyComponent. No     }
+{ delete. Same-library copy requires a different new_name. Libraries resolve by  }
+{ path (default source = focused, dest = source). A name already in dest errors  }
+{ unless overwrite.                                                              }
+{ Params: source_name (required), new_name (default source_name),               }
+{         source_library (optional), dest_library (optional), overwrite.         }
+Function Lib_CopyFootprint(Params : String; RequestId : String) : String;
+Var
+    SourceLibPath, DestLibPath, SourceName, NewName, OverwriteStr, RespJson, FpName : String;
+    Overwrite, SameLib : Boolean;
+    SourceLib, DestLib : IPCB_Library;
+    Footprint, NewFP, Existing, Fp : IPCB_LibComponent;
+    J : Integer;
+Begin
+    SourceLibPath := StringReplace(ExtractJsonValue(Params, 'source_library'), '\\', '\', -1);
+    DestLibPath := StringReplace(ExtractJsonValue(Params, 'dest_library'), '\\', '\', -1);
+    SourceName := ExtractJsonValue(Params, 'source_name');
+    NewName := ExtractJsonValue(Params, 'new_name');
+    OverwriteStr := ExtractJsonValue(Params, 'overwrite');
+    Overwrite := (OverwriteStr = 'true') Or (OverwriteStr = 'True') Or (OverwriteStr = '1');
+    If SourceName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'source_name is required');
+        Exit;
+    End;
+    If NewName = '' Then NewName := SourceName;
+
+    { Source library: by path, else the focused PcbLib. }
+    SourceLib := Nil;
+    If SourceLibPath <> '' Then
+    Begin
+        Try SourceLib := PCBServer.GetPCBLibraryByPath(SourceLibPath); Except End;
+        If SourceLib = Nil Then Try SourceLib := PCBServer.LoadPCBLibraryByPath(SourceLibPath); Except End;
+    End
+    Else
+        SourceLib := PCBServer.GetCurrentPCBLibrary;
+    If SourceLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'No source PCB library (source_library not supplied and none focused)');
+        Exit;
+    End;
+    If SourceLibPath = '' Then Try SourceLibPath := SourceLib.Board.FileName; Except End;
+
+    { Destination library: default = source. }
+    SameLib := (DestLibPath = '') Or (UpperCase(DestLibPath) = UpperCase(SourceLibPath));
+    If SameLib Then
+    Begin
+        DestLib := SourceLib;
+        DestLibPath := SourceLibPath;
+        If NewName = SourceName Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'SAME_NAME', 'Copying within the same library requires a different new_name');
+            Exit;
+        End;
+    End
+    Else
+    Begin
+        DestLib := Nil;
+        Try DestLib := PCBServer.GetPCBLibraryByPath(DestLibPath); Except End;
+        If DestLib = Nil Then Try DestLib := PCBServer.LoadPCBLibraryByPath(DestLibPath); Except End;
+        If DestLib = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to open destination PCB library at ' + DestLibPath);
+            Exit;
+        End;
+    End;
+
+    Footprint := Nil;
+    For J := 0 To SourceLib.ComponentCount - 1 Do
+    Begin
+        Fp := SourceLib.GetComponent(J);
+        FpName := '';
+        If Fp <> Nil Then Try FpName := Fp.Name; Except End;
+        If FpName = SourceName Then Begin Footprint := Fp; Break; End;
+    End;
+    If Footprint = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND', 'Footprint not found in ' + SourceLibPath + ': ' + SourceName);
+        Exit;
+    End;
+
+    Existing := DestLib.GetComponentByName(NewName);
+    If (Existing <> Nil) And (Not Overwrite) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NAME_EXISTS', 'A footprint named "' + NewName + '" already exists in ' + DestLibPath + ' (pass overwrite=true to replace)');
+        Exit;
+    End;
+
+    PCBServer.PreProcess;
+    If Existing <> Nil Then
+    Begin
+        Try DestLib.RemoveComponent(Existing); Except End;
+        Try DestLib.DeRegisterComponent(Existing); Except End;
+    End;
+    NewFP := DestLib.CreateNewComponent;
+    If NewFP = Nil Then
+    Begin
+        PCBServer.PostProcess;
+        Result := BuildErrorResponse(RequestId, 'COPY_FAILED', 'CreateNewComponent returned Nil');
+        Exit;
+    End;
+    Try Footprint.CopyTo(NewFP, eFullCopy); Except End;
+    Try NewFP.Name := NewName; Except End;
+    DestLib.RegisterComponent(NewFP);
+    PCBServer.PostProcess;
+
+    Try DestLib.Board.ViewManager_FullUpdate; Except End;
+    Try DestLib.RefreshView; Except End;
+    SaveDocByPath(DestLib.Board.FileName);
+
+    RespJson := '{"success":true'
+        + ',"source_library":"' + EscapeJsonString(SourceLibPath) + '"'
+        + ',"dest_library":"' + EscapeJsonString(DestLibPath) + '"'
+        + ',"source":"' + EscapeJsonString(SourceName) + '"'
+        + ',"new_name":"' + EscapeJsonString(NewName) + '"'
+        + ',"same_library":' + BoolToJsonStr(SameLib) + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
 {..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
@@ -6782,6 +7263,9 @@ Begin
         'set_component_description': Result := Lib_SetComponentDescription(Params, RequestId);
         'get_pin_list':       Result := Lib_GetPinList(Params, RequestId);
         'copy_component':     Result := Lib_CopyComponent(Params, RequestId);
+        'move_components':    Result := Lib_MoveComponents(Params, RequestId);
+        'move_footprints':    Result := Lib_MoveFootprints(Params, RequestId);
+        'copy_footprint':     Result := Lib_CopyFootprint(Params, RequestId);
         'audit_styles':       Result := Lib_AuditStyles(Params, RequestId);
         'set_label_format':   Result := Lib_SetLabelFormat(Params, RequestId);
         'set_label_formats':  Result := Lib_SetLabelFormats(Params, RequestId);
@@ -6796,6 +7280,7 @@ Begin
         'rename_footprint':     Result := Lib_RenameFootprint(Params, RequestId);
         'set_model_name':       Result := Lib_SetModelName(Params, RequestId);
         'set_model_source':     Result := Lib_SetModelSource(Params, RequestId);
+        'probe_footprint':      Result := Lib_ProbeFootprint(Params, RequestId);
         'normalize_implementations': Result := Lib_NormalizeImplementations(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
