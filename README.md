@@ -357,7 +357,7 @@ Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
 | `proj_list_outjob_containers` / `proj_run_outjob` / `proj_run_outjob_all` | OutJob execution (`proj_run_outjob_all` fires every container in one pass) |
 | `proj_generate_fab_package` | Run every OutJob container (Gerber / NC drill / IPC-356 / P&P / assembly / BOM) and return a consolidated manifest of produced files; optional STEP / DXF |
 
-### Library (57 tools)
+### Library (58 tools)
 
 Symbol and footprint creation, linking, batch editing, comparison.
 
@@ -369,7 +369,8 @@ Symbol and footprint creation, linking, batch editing, comparison.
 | `lib_create_footprint` | Footprint creation |
 | `lib_add_footprint_pad` / `lib_add_footprint_track` / `lib_add_footprint_arc` | Footprint primitives |
 | `lib_link_footprint` / `lib_link_3d_model` | Link footprint / 3D model to symbol |
-| `lib_get_components` / `lib_get_component_details` / `lib_search` | Browse and search |
+| `lib_get_components` / `lib_get_component_details` / `lib_search` | Browse and search. `lib_get_components` returns a stable `index` per component |
+| `lib_rename_component` / `lib_delete_component` | Rename or delete one symbol. Both accept `component_index` (the `index` from `lib_get_components`) as well as `component_name`, so a part whose LibReference holds bytes a caller cannot reproduce (an embedded quote or a control char from a broken import) is still reachable |
 | `lib_batch_set_params` / `lib_batch_rename` | Bulk parameter / rename operations |
 | `lib_diff_libraries` | Compare two libraries |
 | `lib_audit_footprint_policies` | Sweep a whole PcbLib and flag footprints that break the library's *own* conventions - pad rules (numbering scheme, drill/layer integrity), pin-1 markings, layer usage, courtyard, silkscreen, 3D models, designator presence/layer/height/centring. Infers each convention by majority across the library; every finding carries expected-vs-actual to drive a fix. Pass `policy` to enforce an explicit standard |
