@@ -397,6 +397,12 @@ Begin
         Else If PropName = 'Text'        Then Obj.Text := Value
         Else If PropName = 'Name'        Then Obj.Name := Value
         Else If PropName = 'LibReference'       Then Obj.LibReference := Value
+        // SourceLibraryName is the design-cache field that records which
+        // library a placed component came from. It is read in GetSchProperty
+        // but had no write case, so obj_modify / batch_modify silently no-oped
+        // (recorded only as an "unknown property"). Clearing it to '' is the
+        // canonical way to detach a part from a stale source-library binding.
+        Else If PropName = 'SourceLibraryName'  Then Obj.SourceLibraryName := Value
         // `Description` is the natural name (matches get_component_info /
         // BOM column / lib_set_component_description); `ComponentDescription`
         // is what ISch_Component actually exposes -- both accepted.
@@ -5978,7 +5984,7 @@ End;
 Function Gen_PlaceNetLabels(Params : String; RequestId : String) : String;
 Var
     LabelsStr, Op, Remaining : String;
-    OpCount, Placed, Failed, Orientation : Integer;
+    OpCount, Placed, Failed, Orientation, Justification : Integer;
     Text : String;
     X, Y : Integer;
     SchDoc : ISch_Document;
@@ -6017,6 +6023,10 @@ Begin
             X := StrToIntDef(GetBatchField(Op, 'x'), 0);
             Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
             Orientation := StrToIntDef(GetBatchField(Op, 'orientation'), 0);
+            { Justification 2 = bottom-right: text ENDS at the anchor so a }
+            { label on a LEFT-facing pin reads to the left of the pin      }
+            { while the anchor (electrical hotspot) stays on the wire.     }
+            Justification := StrToIntDef(GetBatchField(Op, 'justification'), 0);
 
             If Text = '' Then
             Begin
@@ -6037,6 +6047,7 @@ Begin
             NetLabel.Location := Loc;
             NetLabel.Text := Text;
             NetLabel.Orientation := Orientation;
+            Try NetLabel.Justification := Justification; Except End;
             NetLabel.Color := 0;
 
             SchDoc.RegisterSchObjectInContainer(NetLabel);
@@ -6373,6 +6384,141 @@ Begin
             SchDoc.GraphicallyInvalidate;
         End;
 
+        Failed := OpCount - Updated;
+    Finally
+        DesigList.Free;
+        OpsList.Free;
+    End;
+
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"updated":' + IntToStr(Updated) +
+        ',"failed":' + IntToStr(Failed) +
+        ',"total":' + IntToStr(OpCount) + '}');
+End;
+
+{..............................................................................}
+{ Gen_SetSchTextPositions - move Designator (and optionally Comment) text of   }
+{ placed components to explicit sheet coordinates. The offline text-placement  }
+{ pass picks a collision-free side per part; this mirrors those anchors onto   }
+{ the live sheet so it matches the offline render. Coordinates are mils,       }
+{ absolute sheet frame (the same frame place_sch_components uses).             }
+{ Params: positions = 'designator=R1;dx=..;dy=..;vx=..;vy=..~~...'              }
+{         (vx/vy optional; omitted = leave Comment where the library put it),  }
+{         sheet_path (optional; falls back to the focused document).           }
+{..............................................................................}
+
+Function Gen_SetSchTextPositions(Params : String; RequestId : String) : String;
+Var
+    PosStr, SheetPath, Op, Remaining, FieldStr : String;
+    OpCount, Updated, Failed, OpIdx : Integer;
+    DX, DY, VX, VY : Integer;
+    HasV : Boolean;
+    SchDoc : ISch_Document;
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    DesigList, OpsList : TStringList;
+    Loc : TLocation;
+    SrvDoc : IServerDocument;
+Begin
+    PosStr := ExtractJsonValue(Params, 'positions');
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
+    If PosStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'positions required');
+        Exit;
+    End;
+
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+    If SchDoc = Nil Then
+        SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    DesigList := TStringList.Create;
+    OpsList := TStringList.Create;
+    Try
+        Remaining := PosStr;
+        OpCount := 0;
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+            FieldStr := GetBatchField(Op, 'designator');
+            If FieldStr <> '' Then
+            Begin
+                DesigList.Add(FieldStr);
+                OpsList.Add(Op);
+            End;
+        End;
+
+        Updated := 0;
+        SchServer.ProcessControl.PreProcess(SchDoc, '');
+        Try
+            Iter := SchDoc.SchIterator_Create;
+            Try
+                Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+                Obj := Iter.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    Comp := Obj;
+                    OpIdx := DesigList.IndexOf(Comp.Designator.Text);
+                    If OpIdx >= 0 Then
+                    Begin
+                        Op := OpsList[OpIdx];
+                        DX := StrToIntDef(GetBatchField(Op, 'dx'), 0);
+                        DY := StrToIntDef(GetBatchField(Op, 'dy'), 0);
+                        HasV := (GetBatchField(Op, 'vx') <> '')
+                            And (GetBatchField(Op, 'vy') <> '');
+                        VX := StrToIntDef(GetBatchField(Op, 'vx'), 0);
+                        VY := StrToIntDef(GetBatchField(Op, 'vy'), 0);
+
+                        { Record-field write needs a materialized local. }
+                        SchBeginModify(Comp.Designator);
+                        Try
+                            Loc := Comp.Designator.Location;
+                            Loc.X := MilsToCoord(DX);
+                            Loc.Y := MilsToCoord(DY);
+                            Comp.Designator.Location := Loc;
+                            Comp.Designator.Autoposition := False;
+                        Except End;
+                        SchEndModify(Comp.Designator);
+
+                        If HasV Then
+                        Begin
+                            SchBeginModify(Comp.Comment);
+                            Try
+                                Loc := Comp.Comment.Location;
+                                Loc.X := MilsToCoord(VX);
+                                Loc.Y := MilsToCoord(VY);
+                                Comp.Comment.Location := Loc;
+                                Comp.Comment.Autoposition := False;
+                            Except End;
+                            SchEndModify(Comp.Comment);
+                        End;
+                        Inc(Updated);
+                    End;
+                    Obj := Iter.NextSchObject;
+                End;
+            Finally
+                SchDoc.SchIterator_Destroy(Iter);
+            End;
+        Finally
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+            SchDoc.GraphicallyInvalidate;
+        End;
         Failed := OpCount - Updated;
     Finally
         DesigList.Free;
@@ -8263,6 +8409,7 @@ Begin
         'place_power_ports':          Result := Gen_PlacePowerPorts(Params, RequestId);
         'get_sch_doc_pins':           Result := Gen_GetSchDocPins(Params, RequestId);
         'set_sch_components_parameters': Result := Gen_SetSchComponentsParameters(Params, RequestId);
+        'set_sch_text_positions':      Result := Gen_SetSchTextPositions(Params, RequestId);
         'place_sch_components_from_library': Result := Gen_PlaceSchComponentsFromLibrary(Params, RequestId);
         'attach_spice_primitives':    Result := Gen_AttachSpicePrimitivesBatch(Params, RequestId);
     Else
