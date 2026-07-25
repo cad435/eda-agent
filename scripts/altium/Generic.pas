@@ -245,6 +245,7 @@ Begin
         Else If PropName = 'Name'        Then Result := Obj.Name
         Else If PropName = 'LibReference'       Then Result := Obj.LibReference
         Else If PropName = 'SourceLibraryName'  Then Result := Obj.SourceLibraryName
+        Else If PropName = 'DesignItemId'       Then Result := Obj.DesignItemId
         Else If PropName = 'ComponentDescription' Then Result := Obj.ComponentDescription
         Else If PropName = 'UniqueId'    Then Result := Obj.UniqueId
 
@@ -403,6 +404,14 @@ Begin
         // (recorded only as an "unknown property"). Clearing it to '' is the
         // canonical way to detach a part from a stale source-library binding.
         Else If PropName = 'SourceLibraryName'  Then Obj.SourceLibraryName := Value
+        // DesignItemId is the library ITEM the placed part re-matches
+        // against ("Design Item ID" in the UI). It is a component
+        // PROPERTY, not a parameter: stamping a parameter named
+        // DesignItemId just creates a stray user parameter, and with no
+        // write case here obj_modify silently no-oped while reporting
+        // matched. A stale DesignItemId after a library re-link is what
+        // produces the <Not Found> state in the Properties panel.
+        Else If PropName = 'DesignItemId'       Then Obj.DesignItemId := Value
         // `Description` is the natural name (matches get_component_info /
         // BOM column / lib_set_component_description); `ComponentDescription`
         // is what ISch_Component actually exposes -- both accepted.
@@ -4476,6 +4485,12 @@ Begin
             Begin
                 SchServer.ProcessControl.PreProcess(SchDoc, '');
                 Comp.LibReference := NewLibRef;
+                { DesignItemId must follow the new library reference or
+                  the part keeps re-matching against the OLD library item
+                  and shows <Not Found> after a re-link. Measured: a
+                  replace that updated only LibReference/SourceLibraryName
+                  left every re-linked part in that state. }
+                Try Comp.DesignItemId := NewLibRef; Except End;
                 If NewLibrary <> '' Then
                     Comp.SourceLibraryName := NewLibrary;
                 SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
@@ -8116,6 +8131,123 @@ Begin
 End;
 
 {..............................................................................}
+{ Gen_ClearSchSourceLibrary - schematic mirror of the PCB-side                }
+{ clear_source_footprint_library: unpin placed components from a stale        }
+{ source library so Altium re-matches them from Available Libraries.          }
+{ Per matching component: clear SourceLibraryName, and (default on) sync      }
+{ DesignItemId to LibReference - the corpus-standard repair for the           }
+{ <Not Found> state a re-link leaves behind when DesignItemId still names     }
+{ the OLD library item. DesignItemId is a component PROPERTY, not a           }
+{ parameter; the parameter-stamping path only creates a stray user            }
+{ parameter of that name.                                                      }
+{ Params: sheet_path (optional, focused doc default),                          }
+{         designators (optional comma list; empty = every component),          }
+{         clear_source_library=true, sync_design_item_id=true.                 }
+Function Gen_ClearSchSourceLibrary(Params : String; RequestId : String) : String;
+Var
+    SheetPath, DesigCsv, FlagStr, Desig, LibRef : String;
+    SchDoc : ISch_Document;
+    Iterator : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    DesigList : TStringList;
+    ClearSrc, SyncId, WantAll : Boolean;
+    Total, ClearedSrc, Synced : Integer;
+    SrvDoc : IServerDocument;
+Begin
+    SheetPath := StringReplace(ExtractJsonValue(Params, 'sheet_path'), '\\', '\', -1);
+    DesigCsv := ExtractJsonValue(Params, 'designators');
+    FlagStr := ExtractJsonValue(Params, 'clear_source_library');
+    ClearSrc := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
+    FlagStr := ExtractJsonValue(Params, 'sync_design_item_id');
+    SyncId := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
+
+    SchDoc := Nil;
+    If SheetPath <> '' Then
+        Try SchDoc := SchServer.GetSchDocumentByPath(SheetPath); Except End;
+    If SchDoc = Nil Then
+        SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC',
+            'No schematic document is active');
+        Exit;
+    End;
+
+    DesigList := TStringList.Create;
+    Try
+        DesigList.CommaText := DesigCsv;
+        WantAll := DesigList.Count = 0;
+
+        Total := 0;
+        ClearedSrc := 0;
+        Synced := 0;
+
+        SchServer.ProcessControl.PreProcess(SchDoc, '');
+        Try
+            Iterator := SchDoc.SchIterator_Create;
+            Try
+                Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+                Obj := Iterator.FirstSchObject;
+                While Obj <> Nil Do
+                Begin
+                    Comp := Obj;
+                    Desig := '';
+                    Try Desig := Comp.Designator.Text; Except End;
+                    If WantAll Or (DesigList.IndexOf(Desig) >= 0) Then
+                    Begin
+                        Inc(Total);
+                        If ClearSrc Then
+                        Begin
+                            Try
+                                If Comp.SourceLibraryName <> '' Then
+                                Begin
+                                    SchBeginModify(Comp);
+                                    Comp.SourceLibraryName := '';
+                                    SchEndModify(Comp);
+                                    Inc(ClearedSrc);
+                                End;
+                            Except End;
+                        End;
+                        If SyncId Then
+                        Begin
+                            Try
+                                LibRef := Comp.LibReference;
+                                If (LibRef <> '') And (Comp.DesignItemId <> LibRef) Then
+                                Begin
+                                    SchBeginModify(Comp);
+                                    Comp.DesignItemId := LibRef;
+                                    SchEndModify(Comp);
+                                    Inc(Synced);
+                                End;
+                            Except End;
+                        End;
+                    End;
+                    Obj := Iterator.NextSchObject;
+                End;
+            Finally
+                SchDoc.SchIterator_Destroy(Iterator);
+            End;
+        Finally
+            SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+            SchDoc.GraphicallyInvalidate;
+        End;
+    Finally
+        DesigList.Free;
+    End;
+
+    Try
+        SrvDoc := Client.GetDocumentByPath(SchDoc.DocumentName);
+        If SrvDoc <> Nil Then SrvDoc.SetModified(True);
+    Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"total":' + IntToStr(Total) +
+        ',"cleared_source_library":' + IntToStr(ClearedSrc) +
+        ',"synced_design_item_id":' + IntToStr(Synced) + '}');
+End;
+
+{..............................................................................}
 { Command Handler - must be at end                                            }
 {..............................................................................}
 
@@ -8389,6 +8521,7 @@ Begin
         'set_sch_units':    Result := Gen_SetSchUnits(Params, RequestId);
         'place_image':      Result := Gen_PlaceImage(Params, RequestId);
         'replace_component': Result := Gen_ReplaceComponent(Params, RequestId);
+        'clear_sch_source_library': Result := Gen_ClearSchSourceLibrary(Params, RequestId);
         'get_constraint_groups':      Result := Gen_GetConstraintGroups(Params, RequestId);
         'place_harness_connector':    Result := Gen_PlaceHarnessConnector(Params, RequestId);
         'place_cross_sheet_connector': Result := Gen_PlaceCrossSheetConnector(Params, RequestId);

@@ -7520,6 +7520,207 @@ Begin
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
+{ Lib_GetPadGeometry - full-precision pad dump for the datasheet land-pattern }
+{ audit. Every dimension is emitted in MILLIMETRES as a float (datasheets     }
+{ dimension land patterns metrically; the integer-mil dump used by the policy }
+{ auditor rounds a 0.65 mm pitch by 10 um, which a tolerance-based comparison }
+{ against the datasheet cannot afford). Coordinates are relative to the       }
+{ footprint's own origin. Per pad: centre, size, shape (with roundrect        }
+{ corner percentage), rotation, hole (size / width / type / plated), layer,   }
+{ and the paste / solder mask expansions with whether each is a manual        }
+{ override (Cache.*Valid = eCacheManual) or rule-driven.                      }
+{ Params: footprint_name (required), library_path (optional, focused).       }
+Function Lib_GetPadGeometry(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FpWanted, FpName, FpDescr : String;
+    ShapeStr, HoleStr, LayerStr, PadsJson, RespJson, ExpSrc : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    Footprint, Target : IPCB_LibComponent;
+    GrpIter : IPCB_GroupIterator;
+    Pad : IPCB_Pad;
+    XOrg, YOrg : Integer;
+    Count, CornerPct : Integer;
+    ExpVal : Double;
+Begin
+    LibPath := StringReplace(ExtractJsonValue(Params, 'library_path'), '\\', '\', -1);
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    If FpWanted = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'footprint_name is required');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY', 'No library is active and library_path was not supplied');
+        Exit;
+    End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB', 'Failed to focus PCB library at ' + LibPath);
+        Exit;
+    End;
+
+    Target := Nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            Try FpName := Footprint.Name; Except End;
+            If FpName = FpWanted Then Begin Target := Footprint; Break; End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
+            'Footprint not found: ' + FpWanted);
+        Exit;
+    End;
+
+    FpName := '';
+    FpDescr := '';
+    Try FpName := Target.Name; Except End;
+    Try FpDescr := Target.Description; Except End;
+    XOrg := 0;  YOrg := 0;
+    Try XOrg := Target.X; Except End;
+    Try YOrg := Target.Y; Except End;
+
+    PadsJson := '[';
+    Count := 0;
+    GrpIter := Target.GroupIterator_Create;
+    Try
+        GrpIter.AddFilter_ObjectSet(MkSet(ePadObject));
+        Pad := GrpIter.FirstPCBObject;
+        While Pad <> Nil Do
+        Begin
+            ShapeStr := 'round';
+            Try
+                If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
+                Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
+                Else If Pad.TopShape = eRoundRectangle Then ShapeStr := 'roundrectangle'
+                Else ShapeStr := 'round';
+            Except End;
+
+            CornerPct := 0;
+            If ShapeStr = 'roundrectangle' Then
+            Begin
+                Try CornerPct := Pad.CRPercentage[eTopLayer]; Except End;
+            End;
+
+            HoleStr := 'round';
+            Try
+                If Pad.HoleType = eSquareHole Then HoleStr := 'square'
+                Else If Pad.HoleType = eSlotHole Then HoleStr := 'slot'
+                Else HoleStr := 'round';
+            Except End;
+
+            LayerStr := 'top';
+            Try
+                If (Pad.Layer = eMultiLayer) Or (Pad.HoleSize > 0) Then LayerStr := 'multi'
+                Else If Pad.Layer = eBottomLayer Then LayerStr := 'bottom'
+                Else LayerStr := 'top';
+            Except End;
+
+            If Count > 0 Then PadsJson := PadsJson + ',';
+            PadsJson := PadsJson +
+                '{"name":"' + EscapeJsonString(Pad.Name) + '"' +
+                ',"x_mm":' + FloatToJsonStr(CoordToMM(Pad.X - XOrg)) +
+                ',"y_mm":' + FloatToJsonStr(CoordToMM(Pad.Y - YOrg)) +
+                ',"w_mm":' + FloatToJsonStr(CoordToMM(Pad.TopXSize)) +
+                ',"h_mm":' + FloatToJsonStr(CoordToMM(Pad.TopYSize)) +
+                ',"shape":"' + ShapeStr + '"' +
+                ',"corner_pct":' + IntToStr(CornerPct) +
+                ',"rotation":' + FloatToJsonStr(Pad.Rotation) +
+                ',"hole_mm":' + FloatToJsonStr(CoordToMM(Pad.HoleSize));
+
+            { Slot holes carry a second dimension. }
+            ExpVal := 0;
+            If HoleStr = 'slot' Then
+            Begin
+                Try ExpVal := CoordToMM(Pad.HoleWidth); Except End;
+            End;
+            PadsJson := PadsJson +
+                ',"hole_w_mm":' + FloatToJsonStr(ExpVal) +
+                ',"hole_type":"' + HoleStr + '"';
+
+            Try
+                PadsJson := PadsJson + ',"plated":' + BoolToJsonStr(Pad.Plated);
+            Except
+                PadsJson := PadsJson + ',"plated":true';
+            End;
+            PadsJson := PadsJson + ',"layer":"' + LayerStr + '"';
+
+            { Paste expansion: value + manual-vs-rule source. }
+            ExpVal := 0;
+            ExpSrc := 'rule';
+            Try
+                If Pad.Cache.PasteMaskExpansionValid = eCacheManual Then
+                Begin
+                    ExpVal := CoordToMM(Pad.Cache.PasteMaskExpansion);
+                    ExpSrc := 'manual';
+                End;
+            Except End;
+            PadsJson := PadsJson +
+                ',"paste_expansion_mm":' + FloatToJsonStr(ExpVal) +
+                ',"paste_expansion_source":"' + ExpSrc + '"';
+
+            { Solder mask expansion: same pattern. }
+            ExpVal := 0;
+            ExpSrc := 'rule';
+            Try
+                If Pad.Cache.SolderMaskExpansionValid = eCacheManual Then
+                Begin
+                    ExpVal := CoordToMM(Pad.Cache.SolderMaskExpansion);
+                    ExpSrc := 'manual';
+                End;
+            Except End;
+            PadsJson := PadsJson +
+                ',"mask_expansion_mm":' + FloatToJsonStr(ExpVal) +
+                ',"mask_expansion_source":"' + ExpSrc + '"}';
+
+            Inc(Count);
+            Pad := GrpIter.NextPCBObject;
+        End;
+    Finally
+        Target.GroupIterator_Destroy(GrpIter);
+    End;
+    PadsJson := PadsJson + ']';
+
+    RespJson :=
+        '{"name":"' + EscapeJsonString(FpName) + '"' +
+        ',"description":"' + EscapeJsonString(FpDescr) + '"' +
+        ',"library_path":"' + EscapeJsonString(LibPath) + '"' +
+        ',"pad_count":' + IntToStr(Count) +
+        ',"pads":' + PadsJson + '}';
+    Result := BuildSuccessResponse(RequestId, RespJson);
+End;
+
 {..............................................................................}
 { Command Handler - must be at end                                             }
 {..............................................................................}
@@ -7581,6 +7782,7 @@ Begin
         'set_model_name':       Result := Lib_SetModelName(Params, RequestId);
         'set_model_source':     Result := Lib_SetModelSource(Params, RequestId);
         'probe_footprint':      Result := Lib_ProbeFootprint(Params, RequestId);
+        'get_pad_geometry':     Result := Lib_GetPadGeometry(Params, RequestId);
         'normalize_implementations': Result := Lib_NormalizeImplementations(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
