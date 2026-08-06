@@ -349,6 +349,24 @@ def test_partreel_index_is_memoised_across_instances(monkeypatch):
 
 
 
+def _kicad_local_available() -> bool:
+    """Whether KiCad's libraries are installed on THIS machine.
+
+    Asked of the provider rather than assumed, because the two tests
+    below assert against a real installed library. A developer box has
+    KiCad and CI does not, so an unconditional assertion here tests the
+    machine instead of the code, and fails only after a push.
+    """
+    from eda_agent.libimport.providers import get_provider
+    from eda_agent.libimport.providers.base import ProviderError
+
+    try:
+        get_provider("kicad_local").search("", limit=1)
+        return True
+    except ProviderError:
+        return False
+
+
 def test_search_still_works_with_no_network(monkeypatch, tmp_path):
     """A dead internet must degrade the search, not break it.
 
@@ -370,13 +388,25 @@ def test_search_still_works_with_no_network(monkeypatch, tmp_path):
 
     result = search_all("STM32F103", limit_per_provider=3)
 
-    # The local provider still answers.
-    assert result["providers"]["kicad_local"]["ok"] is True
-    assert result["count"] >= 1
-    # And the remote ones explain themselves rather than going quiet.
+    # The part that must hold on ANY machine: the fan-out completes, and
+    # every remote source explains itself rather than going quiet. A
+    # provider that returned nothing here would read as "no such part".
     assert result["providers"]["partreel"]["ok"] is False
     assert "unavailable" in result["providers"]["partreel"] or \
         "error" in result["providers"]["partreel"]
+    for name, status in result["providers"].items():
+        if status.get("ok") is False:
+            assert status.get("unavailable") or status.get("error"), (
+                f"{name} failed without saying why, which is "
+                f"indistinguishable from finding nothing")
+
+    # The local provider still answers, but only where it is installed.
+    # Asserting this unconditionally made the test depend on the machine
+    # rather than on the behaviour: it passed on a developer box with
+    # KiCad present and failed in CI, which has no KiCad.
+    if _kicad_local_available():
+        assert result["providers"]["kicad_local"]["ok"] is True
+        assert result["count"] >= 1
 
 
 def test_correlation_groups_across_providers(only_fakes):
@@ -511,6 +541,46 @@ def test_one_failed_artefact_does_not_lose_the_others(monkeypatch,
     assert "500" in written["symbol_error"]
 
 
+def test_a_source_with_nothing_to_download_says_so(only_fakes,
+                                                   monkeypatch):
+    """The same guarantee as the test below, on any machine.
+
+    That one asserts against a real installed KiCad symbol, so it skips
+    where KiCad is absent, which is exactly where regressions land
+    unnoticed. This one uses a fake with no download method, so the
+    behaviour stays covered in CI.
+    """
+    import asyncio
+
+    from eda_agent.tools.parts import register_parts_tools
+
+    fake = _Fake("nodownload", ["PART-1"])
+    fake.fetch = lambda part_id: {"part_id": part_id}
+    only_fakes(fake)
+    monkeypatch.setattr(
+        "eda_agent.libimport.providers.get_provider", lambda name: fake)
+
+    captured = {}
+
+    class _Capture:
+        def tool(self, *a, **k):
+            def deco(fn):
+                captured[fn.__name__] = fn
+                return fn
+            return deco
+
+    register_parts_tools(_Capture())
+    out = asyncio.run(captured["part_fetch"](
+        provider="nodownload", part_id="PART-1", download_dir="unused"))
+
+    assert out["ok"] is True
+    assert out["files"] == {}
+    assert "no downloadable files" in out["download_note"]
+
+
+@pytest.mark.skipif(not _kicad_local_available(),
+                    reason="needs KiCad's libraries installed; this "
+                           "asserts against a real symbol on disk")
 def test_provider_without_download_says_so_rather_than_failing():
     """kicad_local locates a symbol already on disk; nothing to fetch."""
     import asyncio
