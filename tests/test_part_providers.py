@@ -361,7 +361,12 @@ def _kicad_local_available() -> bool:
     from eda_agent.libimport.providers.base import ProviderError
 
     try:
-        get_provider("kicad_local").search("", limit=1)
+        # A NON-EMPTY query on purpose. kicad_local short-circuits an
+        # empty one with `if not needle: return []` before it ever looks
+        # for a library directory, so probing with "" reports success on
+        # a machine with no KiCad at all. That is not hypothetical: it is
+        # what made this helper return True in CI and the guard useless.
+        get_provider("kicad_local").search("a", limit=1)
         return True
     except ProviderError:
         return False
