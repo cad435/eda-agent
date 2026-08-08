@@ -357,19 +357,15 @@ def _kicad_local_available() -> bool:
     KiCad and CI does not, so an unconditional assertion here tests the
     machine instead of the code, and fails only after a push.
     """
-    from eda_agent.libimport.providers import get_provider
-    from eda_agent.libimport.providers.base import ProviderError
+    from eda_agent.libimport.providers.kicad_local import _symbol_dir
 
-    try:
-        # A NON-EMPTY query on purpose. kicad_local short-circuits an
-        # empty one with `if not needle: return []` before it ever looks
-        # for a library directory, so probing with "" reports success on
-        # a machine with no KiCad at all. That is not hypothetical: it is
-        # what made this helper return True in CI and the guard useless.
-        get_provider("kicad_local").search("a", limit=1)
-        return True
-    except ProviderError:
-        return False
+    # Ask the same question the provider asks itself. Probing through
+    # search() was wrong twice over: an empty query short-circuits with
+    # `if not needle: return []` before any directory lookup happens, so
+    # it reported success on a machine with no KiCad, and a non-empty one
+    # scans every library just to answer yes or no. _symbol_dir is the
+    # actual predicate, and it is what test_kicad_corpus already uses.
+    return _symbol_dir() is not None
 
 
 def test_search_still_works_with_no_network(monkeypatch, tmp_path):

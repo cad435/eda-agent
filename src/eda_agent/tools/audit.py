@@ -236,6 +236,35 @@ def _component_class_from_designator(des: str) -> str:
     audits classify the same way the Components tab chips do."""
     if not des:
         return "other"
+
+    # MULTI-LETTER PREFIXES FIRST, then the single letter.
+    #
+    # Reading only des[0] classified IC1, IC2 and IC3 as "other",
+    # because the first letter is I. IC is the standard prefix for an
+    # integrated circuit outside the U convention, and a live board
+    # used it for three of its four ICs: the
+    # datasheet audit examined 2 parts out of 111 and reported no
+    # violations, which is a clean bill of health for a board it had
+    # barely looked at.
+    #
+    # Checked before the single letter and falling through to it, so
+    # every existing answer is unchanged: X still means connector for
+    # XTAL1, which the old code decided from its first letter alone.
+    import re as _re
+
+    letters = (_re.match(r"[A-Za-z]+", des) or _re.match("", "")).group(0)
+    multi = {
+        "IC": "ic",
+        # A resistor or capacitor network is still a passive, and RN1
+        # would otherwise read as a resistor by its first letter, which
+        # happens to be right for the wrong reason.
+        "RN": "passive", "CN": "passive",
+        # Ferrite bead: a passive, and F alone is a fuse.
+        "FB": "passive",
+    }
+    if letters.upper() in multi:
+        return multi[letters.upper()]
+
     prefix = des[0].upper()
     if prefix == "C":
         return "passive"

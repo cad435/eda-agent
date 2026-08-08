@@ -12,7 +12,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 
 from .tools import (
-    DEFAULT_BACKEND, DEFAULT_TOOLSET, TOOLSETS, register_backend,
+    BACKENDS, DEFAULT_BACKEND, DEFAULT_TOOLSET, TOOLSETS, register_backend,
 )
 from .config import get_config
 
@@ -482,10 +482,16 @@ def main() -> int:
     # from EDA_AGENT_BACKEND; when this flag names a different backend we
     # re-exec with that env set so registration runs against the right one.
     parser.add_argument(
-        "--backend", choices=("altium", "kicad", "both"), default=None,
+        # Choices come from BACKENDS rather than a literal list: adding a
+        # backend to the registry and forgetting this line rejects the new
+        # name here while EDA_AGENT_BACKEND accepts it, so the flag and the
+        # variable disagree about what exists. That is how 'easyeda' was
+        # unreachable from the CLI after the backend itself worked.
+        "--backend", choices=BACKENDS, default=None,
         help=("Which EDA tool to drive (default: altium). Selects the tool "
               "surface: 'altium' is the full Altium suite, 'kicad' the "
-              "KiCad-native tools, 'both' the union. Equivalent to setting "
+              "KiCad-native tools, 'easyeda' the EasyEDA Pro tools, 'both' "
+              "the union of Altium and KiCad. Equivalent to setting "
               "EDA_AGENT_BACKEND."),
     )
     parser.add_argument(
@@ -512,7 +518,7 @@ def main() -> int:
         help="Alias for --no-dashboard.",
     )
     serve_p.add_argument(
-        "--backend", choices=("altium", "kicad", "both"), default=None,
+        "--backend", choices=BACKENDS, default=None,
         help="Which EDA tool to drive (see top-level flag).",
     )
 

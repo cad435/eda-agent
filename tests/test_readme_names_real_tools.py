@@ -142,3 +142,46 @@ def test_a_registered_tool_is_recognised():
         "tests/test_bridge_handlers_reachable.py; if that changed, this "
         "assertion should be updated deliberately rather than deleted"
     )
+
+
+def test_the_readme_documents_every_backend_the_code_offers():
+    """The backend list is stated in the README and in BACKENDS.
+
+    Nothing connects them. A backend added to the code but missing from
+    the docs is invisible to anyone deciding whether this project drives
+    their EDA tool, which is the one question the README exists to
+    answer.
+    """
+    import pathlib
+
+    from eda_agent.tools import BACKENDS
+
+    readme = (pathlib.Path(__file__).resolve().parents[1]
+              / "README.md").read_text(encoding="utf-8")
+
+    for backend in BACKENDS:
+        assert f"`{backend}`" in readme, (
+            f"backend {backend!r} is selectable but the README never "
+            f"names it")
+
+
+def test_the_readme_names_the_easyeda_environment_variables():
+    """A variable nobody can find is a feature nobody can enable."""
+    import pathlib
+    import re
+
+    from eda_agent.bridge import easyeda_bridge
+
+    readme = (pathlib.Path(__file__).resolve().parents[1]
+              / "README.md").read_text(encoding="utf-8")
+
+    source = pathlib.Path(easyeda_bridge.__file__).read_text(encoding="utf-8")
+    variables = set(re.findall(r'environ\.get\(\s*"(EDA_AGENT_\w+)"', source))
+    assert variables, "no environment variables parsed; the pattern drifted"
+
+    for name in variables:
+        # Word boundary, not substring: documenting EDA_AGENT_EASYEDA_PORTS
+        # would satisfy a plain `in` check while leaving the real
+        # variable unset.
+        assert re.search(rf"\b{re.escape(name)}\b", readme), (
+            f"{name} is read by the bridge but never named in the README")

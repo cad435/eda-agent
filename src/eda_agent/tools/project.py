@@ -872,7 +872,7 @@ def register_project_tools(mcp):
         rejects them with ``IMAGE_FORMAT_UNSUPPORTED`` and points the
         caller at ``proj_run_outjob`` instead.
 
-        Under the hood the PDF path uses Altium's
+        The PDF path uses Altium's
         ``WorkspaceManager:Print`` server process with ``FileName=`` - the
         same machinery as ``proj_export_pdf``. No OutJob is loaded. The print
         runs against ``Client.CurrentView`` (the focused document), so

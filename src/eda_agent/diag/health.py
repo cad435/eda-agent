@@ -193,6 +193,52 @@ def _check_bridge_constructable() -> Check:
     return Check(name="bridge constructable", status=Status.PASS)
 
 
+def _check_easyeda_extension_built() -> Check:
+    """Is the editor half of the EasyEDA bridge ready to install?
+
+    Reported even on an Altium install, because the failure it prevents
+    is silent and confusing: EasyEDA DIALS OUT to this server, so a
+    missing extension looks exactly like a server that is not listening.
+    Someone debugging that will check ports and firewalls for a while
+    before suspecting the half that lives inside the editor.
+    """
+    source = (Path(__file__).resolve().parents[3]
+              / "extensions" / "easyeda" / "main.js")
+    built = source.parent / "dist" / "index.js"
+
+    if not source.is_file():
+        # Not an error on a source install that omits the extension.
+        return Check(
+            name="easyeda extension",
+            status=Status.SKIP,
+            message="no extensions/easyeda/main.js in this install",
+        )
+
+    if not built.is_file():
+        return Check(
+            name="easyeda extension",
+            status=Status.WARN,
+            severity=Severity.MINOR,
+            message="the extension is not built, so EasyEDA has nothing "
+                    "to install and will never connect",
+            fix="Run `python extensions/easyeda/build.py`, then install "
+                "the folder from EasyEDA Pro: Settings > Extensions.",
+        )
+
+    if built.read_text(encoding="utf-8") != source.read_text(encoding="utf-8"):
+        return Check(
+            name="easyeda extension",
+            status=Status.WARN,
+            severity=Severity.MINOR,
+            message="the built extension is older than main.js, so EasyEDA "
+                    "is running code that no longer matches this server",
+            fix="Rebuild with `python extensions/easyeda/build.py` and "
+                "reload the extension in EasyEDA.",
+        )
+
+    return Check(name="easyeda extension", status=Status.PASS)
+
+
 def run_health_checks() -> list[Check]:
     """Order matters, earlier failures often explain later ones."""
     return [
@@ -201,4 +247,5 @@ def run_health_checks() -> list[Check]:
         _check_bundled_scripts(),
         _check_deployed_scripts_current(),
         _check_bridge_constructable(),
+        _check_easyeda_extension_built(),
     ]

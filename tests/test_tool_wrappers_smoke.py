@@ -98,53 +98,16 @@ class FakeBridge:
 def isolated_bridge(monkeypatch, tmp_path):
     """Install the fake everywhere, and a tripwire behind it.
 
-    Also redirects ``workspace_dir`` at a temp directory. Faking the
-    bridge is not enough on its own: several tools write their output
-    from the PYTHON side using whatever the bridge returned, so a smoke
-    run put netlist.net and board_stackup.csv into the real workspace
-    and overwrote bom.html there. The bridge is only one of the two
-    ways out of the process.
+    The wiring lives in ``tests.conftest.install_bridge_fake`` so that
+    every bulk-invoke test shares ONE proven isolation instead of
+    re-deriving it; re-derived isolation is how both incidents happened.
+    The proof tests below exercise the shared helper, so any test using
+    it inherits a checked guarantee, not an asserted one.
     """
-    from eda_agent import config as config_module
-    from eda_agent.bridge import altium_bridge as ab
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    real_get_config = config_module.get_config
-
-    def sandboxed_config():
-        cfg = real_get_config()
-        object.__setattr__(cfg, "workspace_dir", workspace)
-        return cfg
-
-    monkeypatch.setattr(config_module, "get_config", sandboxed_config)
-    for mod_name in ("project", "render", "generic", "library", "pcb"):
-        try:
-            mod = importlib.import_module(f"eda_agent.tools.{mod_name}")
-        except ImportError:  # pragma: no cover
-            continue
-        if hasattr(mod, "get_config"):
-            monkeypatch.setattr(mod, "get_config", sandboxed_config)
-
-    def tripwire(*_args, **_kwargs):
-        raise AssertionError(TRIPWIRE)
-
-    monkeypatch.setattr(ab.AltiumBridge, "__init__", tripwire)
-    monkeypatch.setattr(ab.AltiumBridge, "send_command", tripwire)
-    monkeypatch.setattr(ab.AltiumBridge, "send_command_async", tripwire)
-    monkeypatch.setattr(ab, "_bridge", None, raising=False)
+    from tests.conftest import install_bridge_fake
 
     fake = FakeBridge()
-    monkeypatch.setattr(ab, "get_bridge", lambda: fake)
-
-    import eda_agent.bridge as bridge_pkg
-    monkeypatch.setattr(bridge_pkg, "get_bridge", lambda: fake)
-
-    import eda_agent.tools as tools_pkg
-    for mod_info in pkgutil.iter_modules(tools_pkg.__path__):
-        mod = importlib.import_module(f"eda_agent.tools.{mod_info.name}")
-        if hasattr(mod, "get_bridge"):
-            monkeypatch.setattr(mod, "get_bridge", lambda: fake)
+    install_bridge_fake(monkeypatch, tmp_path, fake)
     return fake
 
 
