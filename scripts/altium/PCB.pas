@@ -3779,6 +3779,244 @@ Begin
 End;
 
 {..............................................................................}
+{ Layer colour conversion.                                                    }
+{                                                                              }
+{ Altium carries a colour as a Windows TColor, which is $00BBGGRR: the byte   }
+{ order is the REVERSE of the #RRGGBB people write down. Converting in one    }
+{ place stops every caller getting it backwards, which does not fail loudly.  }
+{ It produces a plausible colour that is simply the wrong one, and red and    }
+{ blue swapping is easy to miss on a busy board.                              }
+{..............................................................................}
+
+Function HexDigitValue(Ch : String) : Integer;
+Var
+    O : Integer;
+    U : String;
+Begin
+    Result := -1;
+    If Ch = '' Then Exit;
+    { Materialise before indexing. DelphiScript cannot subscript the       }
+    { RESULT of a function call, so UpperCase(Ch)[1] is a compile error    }
+    { rather than a runtime one.                                            }
+    U := UpperCase(Ch);
+    O := Ord(U[1]);
+    If (O >= Ord('0')) And (O <= Ord('9')) Then Result := O - Ord('0')
+    Else If (O >= Ord('A')) And (O <= Ord('F')) Then Result := 10 + O - Ord('A');
+End;
+
+Function ColorToHexRgb(C : Integer) : String;
+Var
+    R, G, B : Integer;
+    Digits : String;
+Begin
+    Digits := '0123456789ABCDEF';
+    B := (C Shr 16) And 255;
+    G := (C Shr 8) And 255;
+    R := C And 255;
+    Result := '#'
+        + Copy(Digits, ((R Shr 4) And 15) + 1, 1) + Copy(Digits, (R And 15) + 1, 1)
+        + Copy(Digits, ((G Shr 4) And 15) + 1, 1) + Copy(Digits, (G And 15) + 1, 1)
+        + Copy(Digits, ((B Shr 4) And 15) + 1, 1) + Copy(Digits, (B And 15) + 1, 1);
+End;
+
+{ #RRGGBB to a TColor, or -1 when the text is not a colour. Refusing is the  }
+{ point: silently treating a typo as black would repaint a layer.            }
+
+Function HexRgbToColor(S : String) : Integer;
+Var
+    T : String;
+    D0, D1, D2, D3, D4, D5, R, G, B : Integer;
+Begin
+    Result := -1;
+    T := Trim(S);
+    If Copy(T, 1, 1) = '#' Then T := Copy(T, 2, Length(T));
+    If Length(T) <> 6 Then Exit;
+
+    { Six named locals rather than an array: a fixed size array declared   }
+    { inside a Function corrupts the return value in this dialect.         }
+    D0 := HexDigitValue(Copy(T, 1, 1));
+    D1 := HexDigitValue(Copy(T, 2, 1));
+    D2 := HexDigitValue(Copy(T, 3, 1));
+    D3 := HexDigitValue(Copy(T, 4, 1));
+    D4 := HexDigitValue(Copy(T, 5, 1));
+    D5 := HexDigitValue(Copy(T, 6, 1));
+    If (D0 < 0) Or (D1 < 0) Or (D2 < 0) Then Exit;
+    If (D3 < 0) Or (D4 < 0) Or (D5 < 0) Then Exit;
+
+    R := (D0 Shl 4) Or D1;
+    G := (D2 Shl 4) Or D3;
+    B := (D4 Shl 4) Or D5;
+    Result := (B Shl 16) Or (G Shl 8) Or R;
+End;
+
+{..............................................................................}
+{ PCB_GetLayerDisplay - Visibility and colour for every layer.               }
+{                                                                              }
+{ The range eTopLayer..eMultiLayer covers signal, plane, mechanical, mask,    }
+{ paste, silk, keepout and multilayer, and GetLayerString filters out the     }
+{ ordinals that are not real layers.                                          }
+{..............................................................................}
+
+Function PCB_GetLayerDisplay(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    PCBSysOpts : IPCB_SystemOptions;
+    LayerStack : IPCB_LayerStack_V7;
+    LayerObj : IPCB_LayerObject_V7;
+    Lyr : TLayer;
+    JsonItems, LyrNm, UserName : String;
+    First, Visible : Boolean;
+    Color, Count, Shown : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    PCBSysOpts := Nil;
+    Try PCBSysOpts := PCBServer.SystemOptions; Except End;
+    If PCBSysOpts = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SYSTEM_OPTIONS',
+            'Could not reach PCBServer.SystemOptions, which is where layer '
+            + 'colours live. Nothing was read, so this is not a report that '
+            + 'the board has no colours.');
+        Exit;
+    End;
+
+    LayerStack := Nil;
+    Try LayerStack := Board.LayerStack_V7; Except End;
+
+    JsonItems := '';
+    First := True;
+    Count := 0;
+    Shown := 0;
+
+    For Lyr := eTopLayer To eMultiLayer Do
+    Begin
+        LyrNm := GetLayerString(Lyr);
+        If LyrNm <> 'Unknown' Then
+        Begin
+            Color := 0;
+            Visible := False;
+            Try Color := PCBSysOpts.LayerColors[Lyr]; Except End;
+            Try Visible := Board.LayerIsDisplayed[Lyr]; Except End;
+
+            { The name the user gave the layer, which for a mechanical  }
+            { layer is the only way to tell one from another.           }
+            UserName := '';
+            If LayerStack <> Nil Then
+            Begin
+                LayerObj := Nil;
+                Try LayerObj := LayerStack.LayerObject_V7[Lyr]; Except LayerObj := Nil; End;
+                If LayerObj <> Nil Then
+                    Try UserName := LayerObj.Name; Except UserName := ''; End;
+            End;
+
+            If Not First Then JsonItems := JsonItems + ',';
+            First := False;
+            JsonItems := JsonItems
+                + '{"layer":"' + EscapeJsonString(LyrNm) + '",'
+                + '"name":"' + EscapeJsonString(UserName) + '",'
+                + '"visible":' + BoolToJsonStr(Visible) + ','
+                + '"color":' + IntToStr(Color) + ','
+                + '"color_hex":"' + ColorToHexRgb(Color) + '"}';
+            Inc(Count);
+            If Visible Then Inc(Shown);
+        End;
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"layers":[' + JsonItems + '],"count":' + IntToStr(Count)
+        + ',"visible_count":' + IntToStr(Shown) + '}');
+End;
+
+{..............................................................................}
+{ PCB_SetLayerColor - Recolour one layer.                                     }
+{ Params: layer, color (#RRGGBB)                                              }
+{..............................................................................}
+
+Function PCB_SetLayerColor(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    PCBSysOpts : IPCB_SystemOptions;
+    LayerStr, ColorStr : String;
+    LayerID : TLayer;
+    Wanted, Readback : Integer;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'layer required');
+        Exit;
+    End;
+
+    ColorStr := ExtractJsonValue(Params, 'color');
+    If ColorStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'color required, as #RRGGBB');
+        Exit;
+    End;
+
+    Wanted := HexRgbToColor(ColorStr);
+    If Wanted < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_COLOR',
+            'color must be #RRGGBB, got: ' + ColorStr);
+        Exit;
+    End;
+
+    LayerID := GetLayerFromString(LayerStr);
+    If LayerID = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_LAYER',
+            'Unknown layer name: ' + LayerStr);
+        Exit;
+    End;
+
+    PCBSysOpts := Nil;
+    Try PCBSysOpts := PCBServer.SystemOptions; Except End;
+    If PCBSysOpts = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SYSTEM_OPTIONS',
+            'Could not reach PCBServer.SystemOptions, where layer colours live');
+        Exit;
+    End;
+
+    Try PCBSysOpts.LayerColors[LayerID] := Wanted; Except End;
+
+    { Read back rather than trusting the write, for the same reason the      }
+    { mechanical layer kind does: a refused late bound assignment raises     }
+    { nothing, so success here would mean only that no exception escaped.    }
+    Readback := -1;
+    Try Readback := PCBSysOpts.LayerColors[LayerID]; Except Readback := -1; End;
+    If Readback <> Wanted Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'COLOR_NOT_APPLIED',
+            'The write was accepted but the layer still reads as '
+            + ColorToHexRgb(Readback) + '. The colour was NOT changed.');
+        Exit;
+    End;
+
+    Try Board.ViewManager_FullUpdate; Except End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"layer":"' + EscapeJsonString(GetLayerString(LayerID)) + '",'
+        + '"color":' + IntToStr(Wanted) + ','
+        + '"color_hex":"' + ColorToHexRgb(Wanted) + '"}');
+End;
+
+{..............................................................................}
 { PCB_SetLayerVisibility - Show/hide specific layers                          }
 { Params: layer=<layer_name>, visible=<true|false>                           }
 {..............................................................................}
@@ -7430,7 +7668,6 @@ Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'child_path is required');
         Exit;
     End;
-    ChildPath := StringReplace(ChildPath, '\\', '\', -1);
 
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
@@ -9168,6 +9405,277 @@ Begin
 End;
 
 {..............................................................................}
+{ PCB_SetMechLayerKind - Assign the kind of one mechanical layer.             }
+{ Params: layer, kind (a name such as 'Courtyard Top', or its number)         }
+{                                                                              }
+{ A kind belongs to ONE layer at a time. Assigning a kind that another layer  }
+{ already holds leaves two layers claiming the same purpose, so the previous  }
+{ holder is cleared first and reported, rather than leaving the board in a    }
+{ state the stack manager did not intend.                                      }
+{..............................................................................}
+
+Function PCB_SetMechLayerKind(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    LayerStack : IPCB_LayerStack_V7;
+    LayerObj, OtherObj : IPCB_LayerObject_V7;
+    LayerName, KindStr, ClearedJson, PartnerName : String;
+    PairKindJson, PartnerJson : String;
+    TargetLayer, Lyr, PartnerLayer, TopL, BotL : TLayer;
+    KindId, Readback, OtherKind : Integer;
+    PartnerKind, PairKind, PairIdx, PairKindBack : Integer;
+    MechPairs : IPCB_MechanicalLayerPairs;
+    First, Paired, PairApplied : Boolean;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Exit;
+    End;
+
+    LayerName := ExtractJsonValue(Params, 'layer');
+    If LayerName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'layer required');
+        Exit;
+    End;
+
+    KindStr := ExtractJsonValue(Params, 'kind');
+    If KindStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'kind required, for example "Courtyard Top" or "Not Set"');
+        Exit;
+    End;
+
+    KindId := MechKindFromString(KindStr);
+    If KindId < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_KIND',
+            'Unknown mechanical layer kind: ' + KindStr
+            + '. Read pcb_get_mech_layer_names for the names this board '
+            + 'reports, or pass the number.');
+        Exit;
+    End;
+
+    TargetLayer := GetLayerFromString(LayerName);
+    If TargetLayer = eNoLayer Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_LAYER',
+            'Unknown layer name: ' + LayerName);
+        Exit;
+    End;
+
+    If (TargetLayer < eMechanical1) Or (TargetLayer > eMechanical16) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_MECHANICAL',
+            'Layer ' + LayerName + ' is not a mechanical layer. Only '
+            + 'mechanical layers carry a kind.');
+        Exit;
+    End;
+
+    LayerStack := Board.LayerStack_V7;
+    If LayerStack = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_STACKUP', 'Could not access layer stack');
+        Exit;
+    End;
+
+    LayerObj := Nil;
+    Try LayerObj := LayerStack.LayerObject_V7[TargetLayer]; Except LayerObj := Nil; End;
+    If LayerObj = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NOT_IN_STACK',
+            'Layer ' + LayerName + ' is not present in the current stack');
+        Exit;
+    End;
+
+    If ReadMechKind(LayerObj) < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'KIND_UNSUPPORTED',
+            'This Altium build does not expose a mechanical layer kind. '
+            + 'Kinds were introduced after AD18; before that a layer''s '
+            + 'purpose is carried by its name and its layer pairing.');
+        Exit;
+    End;
+
+    { A PAIRED KIND IS HELD BY THE LAYER PAIR, not by either layer.          }
+    {                                                                        }
+    { Writing Kind reads back unchanged for any Top or Bottom kind, on every }
+    { mechanical layer, and leaves the LayerKindMapping stream empty. Pair   }
+    { kinds are a separate enum with no side suffix and its own numbering,   }
+    { written against a pair index. Single kinds such as Fab Notes are       }
+    { unaffected and still go on the layer.                                  }
+    {                                                                        }
+    { The partner cannot be guessed: it is whichever mechanical layer the    }
+    { board uses for the other side, so the caller names it.                 }
+    PartnerKind := MechKindPartner(KindId);
+    PairKind := MechPairKindFromLayerKind(KindId);
+    PartnerName := ExtractJsonValue(Params, 'partner_layer');
+    PartnerLayer := eNoLayer;
+    If PartnerName <> '' Then PartnerLayer := GetLayerFromString(PartnerName);
+
+    If (PartnerKind >= 0) And (PartnerLayer = eNoLayer) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PARTNER_REQUIRED',
+            '"' + MechKindToString(KindId) + '" is one half of a pair, and a '
+            + 'paired kind is held by the layer PAIR rather than by either '
+            + 'layer. Pass partner_layer naming the mechanical layer that '
+            + 'carries "' + MechKindToString(PartnerKind) + '", and the two '
+            + 'will be joined and the pair given the kind "'
+            + MechPairKindToString(PairKind) + '".');
+        Exit;
+    End;
+
+    If (PartnerKind >= 0) And (PartnerLayer = TargetLayer) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'PARTNER_REQUIRED',
+            'partner_layer names the same layer as layer. The two sides of a '
+            + 'pair have to be different mechanical layers.');
+        Exit;
+    End;
+
+    MechPairs := Nil;
+    Try MechPairs := Board.MechanicalPairs; Except MechPairs := Nil; End;
+
+    ClearedJson := '';
+    First := True;
+    PairApplied := False;
+
+    PCBServer.PreProcess;
+    Try
+        { 'Not Set' is the one kind several layers may share, so it never    }
+        { displaces anything. Nor does a paired kind, which no layer holds.   }
+        If (KindId > 0) And (PartnerKind < 0) Then
+        Begin
+            For Lyr := eMechanical1 To eMechanical16 Do
+            Begin
+                If Lyr <> TargetLayer Then
+                Begin
+                    OtherObj := Nil;
+                    Try OtherObj := LayerStack.LayerObject_V7[Lyr]; Except OtherObj := Nil; End;
+                    If OtherObj <> Nil Then
+                    Begin
+                        OtherKind := ReadMechKind(OtherObj);
+                        If OtherKind = KindId Then
+                        Begin
+                            Try OtherObj.Kind := 0; Except End;
+                            If Not First Then ClearedJson := ClearedJson + ',';
+                            First := False;
+                            ClearedJson := ClearedJson
+                                + '"' + EscapeJsonString(GetLayerString(Lyr)) + '"';
+                        End;
+                    End;
+                End;
+            End;
+        End;
+
+        Try LayerObj.Kind := KindId; Except End;
+
+        If (PartnerKind >= 0) And (PairKind >= 0) And (MechPairs <> Nil) Then
+        Begin
+            { AddPair takes the TOP layer first and is the only call that   }
+            { reports an index: PairDefined answers a boolean and           }
+            { LayerPair(i) is noted as broken in the reference, so a pair   }
+            { that already exists cannot be located by reading. Ask for the }
+            { pair first in case AddPair is idempotent, and rebuild it only }
+            { when that gives no index.                                     }
+            If Pos(' Top', MechKindToString(KindId)) > 0 Then
+            Begin
+                TopL := TargetLayer;
+                BotL := PartnerLayer;
+            End
+            Else
+            Begin
+                TopL := PartnerLayer;
+                BotL := TargetLayer;
+            End;
+
+            PairIdx := -1;
+            Try PairIdx := MechPairs.AddPair(TopL, BotL); Except PairIdx := -1; End;
+
+            If PairIdx < 0 Then
+            Begin
+                Paired := False;
+                Try Paired := MechPairs.PairDefined(TopL, BotL); Except Paired := False; End;
+                If Not Paired Then
+                    Try Paired := MechPairs.PairDefined(BotL, TopL); Except Paired := False; End;
+                If Paired Then
+                Begin
+                    Try MechPairs.RemovePair(TopL, BotL); Except End;
+                    Try MechPairs.RemovePair(BotL, TopL); Except End;
+                    Try PairIdx := MechPairs.AddPair(TopL, BotL); Except PairIdx := -1; End;
+                End;
+            End;
+
+            If PairIdx >= 0 Then
+            Begin
+                Try
+                    MechPairs.SetState_LayerPairKind(PairIdx) := PairKind;
+                Except
+                End;
+                PairKindBack := -1;
+                Try
+                    PairKindBack := MechPairs.LayerPairKind(PairIdx);
+                Except
+                    PairKindBack := -1;
+                End;
+                { A build that will not report the pair kind back must not  }
+                { read as a failure, so only a value that came back         }
+                { DIFFERENT counts as refused.                              }
+                PairApplied := (PairKindBack = PairKind) Or (PairKindBack < 0);
+            End;
+        End;
+
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, c_NoEventData);
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    { Read back rather than trusting the write. The assignment is late bound  }
+    { and a refused write raises nothing, so reporting success from the fact  }
+    { that no exception escaped would report success for doing nothing.       }
+    { For a paired kind the layer property reading back unchanged is         }
+    { expected, so the pair is what decides the outcome.                     }
+    Readback := ReadMechKind(LayerObj);
+    If (Readback <> KindId) And (Not PairApplied) Then
+    Begin
+        If PartnerKind >= 0 Then
+            Result := BuildErrorResponse(RequestId, 'KIND_NOT_APPLIED',
+                '"' + MechKindToString(KindId) + '" was refused as pair kind "'
+                + MechPairKindToString(PairKind) + '" on the pair of '
+                + GetLayerString(TargetLayer) + ' and '
+                + GetLayerString(PartnerLayer) + '. The kind was NOT changed.')
+        Else
+            Result := BuildErrorResponse(RequestId, 'KIND_NOT_APPLIED',
+                'The write was accepted but the layer still reads as "'
+                + MechKindToString(Readback) + '". The kind was NOT changed.');
+        Exit;
+    End;
+
+    { Null rather than an empty string for a single kind, so a reader can    }
+    { tell "no pair involved" from "paired under a kind with no name".       }
+    PairKindJson := 'null';
+    PartnerJson := 'null';
+    If PairApplied Then
+        PairKindJson := '"' + EscapeJsonString(MechPairKindToString(PairKind)) + '"';
+    If PartnerLayer <> eNoLayer Then
+        PartnerJson := '"' + EscapeJsonString(GetLayerString(PartnerLayer)) + '"';
+
+    SaveDocByPath(Board.FileName);
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"layer":"' + EscapeJsonString(GetLayerString(TargetLayer)) + '",'
+        + '"kind":"' + EscapeJsonString(MechKindToString(KindId)) + '",'
+        + '"kind_id":' + IntToStr(KindId) + ','
+        + '"paired":' + BoolToJsonStr(PairApplied) + ','
+        + '"pair_kind":' + PairKindJson + ','
+        + '"partner_layer":' + PartnerJson + ','
+        + '"cleared_from":[' + ClearedJson + ']}');
+End;
+
+{..............................................................................}
 { PCB_GetMechLayerNames - List the enabled (displayed) mechanical layers with  }
 { their custom names. Uses only proven accessors (LayerStack_V7 /              }
 { LayerObject_V7[] / LayerIsDisplayed) -- ILayer.MechanicalLayer(i) and        }
@@ -9182,7 +9690,7 @@ Var
     Lyr : TLayer;
     JsonItems, NameStr : String;
     First, Disp : Boolean;
-    Count : Integer;
+    Count, KindId : Integer;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -9214,11 +9722,17 @@ Begin
             Begin
                 NameStr := '';
                 Try NameStr := LayerObj.Name; Except End;
+                { The kind says what the layer is FOR, and a caller setting  }
+                { one needs to see what is already taken: a kind belongs to  }
+                { a single layer. -1 means this build has no kinds at all.   }
+                KindId := ReadMechKind(LayerObj);
                 If Not First Then JsonItems := JsonItems + ',';
                 First := False;
                 JsonItems := JsonItems
                     + '{"layer":"' + EscapeJsonString(GetLayerString(Lyr)) + '",'
-                    + '"name":"' + EscapeJsonString(NameStr) + '"}';
+                    + '"name":"' + EscapeJsonString(NameStr) + '",'
+                    + '"kind":"' + EscapeJsonString(MechKindToString(KindId)) + '",'
+                    + '"kind_id":' + IntToStr(KindId) + '}';
                 Inc(Count);
             End;
         End;
@@ -9685,7 +10199,6 @@ Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'child_path (source .PcbDoc) is required');
         Exit;
     End;
-    ChildPath := StringReplace(ChildPath, '\\', '\', -1);
 
     BoardW := StrToIntDef(ExtractJsonValue(Params, 'board_width_mils'), 0);
     BoardH := StrToIntDef(ExtractJsonValue(Params, 'board_height_mils'), 0);
@@ -11241,6 +11754,9 @@ Begin
         'add_layer':               Result := PCB_AddLayer(Params, RequestId);
         'remove_layer':            Result := PCB_RemoveLayer(Params, RequestId);
         'modify_layer':            Result := PCB_ModifyLayer(Params, RequestId);
+        'set_mech_layer_kind':     Result := PCB_SetMechLayerKind(Params, RequestId);
+        'get_layer_display':       Result := PCB_GetLayerDisplay(Params, RequestId);
+        'set_layer_color':         Result := PCB_SetLayerColor(Params, RequestId);
         'get_board_outline':       Result := PCB_GetBoardOutline(Params, RequestId);
         'get_selected_objects':    Result := PCB_GetSelectedObjects(Params, RequestId);
         'set_layer_visibility':    Result := PCB_SetLayerVisibility(Params, RequestId);

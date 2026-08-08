@@ -1,4 +1,4 @@
-# Release verification: 2026.08.05.1
+# Release verification: 2026.08.08.10
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -70,7 +70,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.05.1`, `version_match` =
+Expect `altium_script_version` = `2026.08.08.10`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -389,6 +389,107 @@ rather than measured. An undeclared identifier faults where `Try/Except`
 cannot catch it and halts the polling loop, so a dead loop right after
 calling this tool points at that call. `Gen_GetErcViolations` is in
 `scripts/altium/Generic.pas`.
+
+---
+
+## 9. Reading a symbol's pins no longer faults (task #34)
+
+Needs a SchLib open.
+
+```
+lib_get_pin_list(component_name="<a symbol in that library>")
+```
+
+Expect a pin list. Then call it again with no `component_name` and a
+symbol selected in the editor, which must also work.
+
+**This one is a fix for an observed crash, not a new feature.** The
+deployed script answered
+`Undeclared identifier: SchIterator_Create` and stopped the polling
+loop. The identical call appears ten times in `Library.pas` and works
+everywhere else; the difference was where the component came from.
+Every working reader fetches it through `GetState_SchComponentByLibRef`
+or a SchLib iterator, while this one used the editor's
+`CurrentSchComponent` directly. DelphiScript narrows an interface at
+iterator-return, and a component obtained any other way does not carry
+the methods.
+
+So this step is really asking one question: does resolving through the
+library make the iterator available? If it does, the explanation holds.
+
+`component_name` is the other half of the fix. Reading a symbol's pins
+used to depend on, and disturb, whatever the editor had selected, which
+is why exporting one symbol could change which symbol later calls saw.
+
+**If it fails with the same identifier**, the narrowing explanation is
+wrong. Say so rather than trying variations: that reasoning came from
+comparing call sites, not from proving the mechanism, and the next step
+would be to instrument rather than guess again.
+
+**If it fails with a different identifier**, that is a second undeclared
+name in the same function and the message will say which.
+
+---
+
+## Step 9: the multi-part scope suffix actually switches part
+
+Reported in GH #11 against a 4-part TPS23881B, with numbers. The `@N`
+suffix parsed and reached the part-switch code, and the switch itself
+did nothing: `Component.CurrentPartID := N` takes the value, the
+editor's part spinner does not move, and the SchLib iterator follows
+the DISPLAYED part. So `obj_query` returned part 1's pins whatever the
+scope said, and with the spinner moved by hand the suffix was ignored
+outright. Nothing errored in either direction.
+
+The fix drives the editor's own command, `SCH:NextComponentPart`, and
+reads `GetState_CurrentSchComponentPartId` back after each step. Both
+appear in two independent scripts under `reference/`, so neither is a
+guess, but neither has run from this codebase.
+
+Open a multi-part SchLib and, with the editor showing part 1:
+
+    obj_query  scope lib_component:<NAME>@2  kind ePin
+    obj_query  scope lib_component:<NAME>@3  kind ePin
+
+Each must return that part's own pin count, and every returned pin must
+carry the matching `OwnerPartId`. Then the sharper test: switch the
+spinner to part 3 by hand and query `@1`. It must return part 1.
+
+**Two ways this fails quietly.** If
+`GetState_CurrentSchComponentPartId` is undeclared, the polling loop
+halts, which is loud. If it returns -1 instead, the stepping is skipped
+by design and the behaviour is exactly the bug being fixed: the same
+wrong answer, no error. So a run that still returns part 1 is not
+evidence the command is wrong, it is evidence the part id could not be
+read. Report which.
+
+The loop is bounded by `PartCount` because the command wraps at the
+last part. A target that can never be reached leaves the editor moved
+but not where asked, so check the spinner afterwards.
+
+---
+
+## 10. UNC paths survive the trip (task #44)
+
+This release deletes the vestigial second unescape
+(`StringReplace(x, '\\', '\', -1)`) from all 94 path-taking handlers.
+`ExtractJsonValue` already unescapes the JSON, so the second pass was a
+no-op for local paths and stripped one leading backslash from UNC
+paths: `\\server\share\lib.SchLib` arrived as
+`\server\share\lib.SchLib` and failed as a missing file.
+
+No new identifiers are involved, only deletions, so the compile risk
+is nil; what needs proving is the behaviour. From a machine with any
+reachable share (an admin share like `\\localhost\C$\...` works):
+
+    lib_get_components  library_path \\localhost\C$\<path-to-any>.SchLib
+
+Before the fix this fails with a file-not-found flavoured error;
+after it, the library opens and lists components. Local absolute paths
+must keep working unchanged, which step 9's queries already exercise.
+
+`tests/test_no_double_unescape.py` pins the site count at zero from
+now on, so this is a one-time verification, not a recurring step.
 
 ---
 

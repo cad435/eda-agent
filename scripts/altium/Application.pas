@@ -161,7 +161,6 @@ Var
     I : Integer;
 Begin
     FilePath := ExtractJsonValue(Params, 'file_path');
-    FilePath := StringReplace(FilePath, '\\', '\', -1);
 
     // Only switch focus to a document that is ALREADY loaded.
     // RunProcess('WorkspaceManager:OpenObject') would load it but strip

@@ -32,7 +32,6 @@ Var
     Saved : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     ProjectType := ExtractJsonValue(Params, 'project_type');
 
     If ProjectType = '' Then ProjectType := 'PCB';
@@ -99,7 +98,6 @@ Var
     ProjectPath : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     ResetParameters;
     AddStringParameter('ObjectKind', 'Project');
@@ -116,7 +114,6 @@ Var
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -146,7 +143,6 @@ Var
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     SaveFirst := ExtractJsonValue(Params, 'save') <> 'false';
 
     Workspace := GetWorkspace;
@@ -187,7 +183,6 @@ Var
     First : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -229,9 +224,7 @@ Var
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     DocumentPath := ExtractJsonValue(Params, 'document_path');
-    DocumentPath := StringReplace(DocumentPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -260,9 +253,7 @@ Var
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     DocumentPath := ExtractJsonValue(Params, 'document_path');
-    DocumentPath := StringReplace(DocumentPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -297,7 +288,6 @@ Var
     Data, ParamInfo : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -339,7 +329,6 @@ Begin
     ParamName := ExtractJsonValue(Params, 'name');
     ParamValue := ExtractJsonValue(Params, 'value');
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     If ParamName = '' Then
     Begin
@@ -406,7 +395,6 @@ Var
     Project : IProject;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
@@ -500,7 +488,6 @@ Var
     First : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     FilterComp := ExtractJsonValue(Params, 'component');
     FilterNet := ExtractJsonValue(Params, 'net_name');
     Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 500);
@@ -591,7 +578,6 @@ Var
     First, FirstPin : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 1000);
 
     Workspace := GetWorkspace;
@@ -690,7 +676,6 @@ Var
     Found : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     Designator := ExtractJsonValue(Params, 'designator');
 
     FlagStr := ExtractJsonValue(Params, 'with_pin_nets');
@@ -833,7 +818,6 @@ Var
     Remaining, EnvelopeData, ResponseStr : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     DesigStr := ExtractJsonValue(Params, 'designators');
 
     FlagStr := ExtractJsonValue(Params, 'with_pin_nets');
@@ -1013,7 +997,6 @@ Var
     OutputPath : String;
 Begin
     OutputPath := ExtractJsonValue(Params, 'output_path');
-    OutputPath := StringReplace(OutputPath, '\\', '\', -1);
 
     If OutputPath = '' Then
     Begin
@@ -1288,7 +1271,6 @@ Var
     Data : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -1522,7 +1504,6 @@ Begin
     Order := ExtractJsonValue(Params, 'order');
     If Order = '' Then Order := 'down_then_across';
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     If SchServer = Nil Then
     Begin
@@ -1775,7 +1756,6 @@ Var
 Begin
     OutputType := ExtractJsonValue(Params, 'output_type');
     OutputPath := ExtractJsonValue(Params, 'output_path');
-    OutputPath := StringReplace(OutputPath, '\\', '\', -1);
 
     If OutputType = '' Then Begin Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'output_type is required'); Exit; End;
 
@@ -1821,7 +1801,6 @@ Var
     OutputPath : String;
 Begin
     OutputPath := ExtractJsonValue(Params, 'output_path');
-    OutputPath := StringReplace(OutputPath, '\\', '\', -1);
 
     ResetParameters;
     If OutputPath <> '' Then
@@ -1844,7 +1823,6 @@ Var
     OutputPath : String;
 Begin
     OutputPath := ExtractJsonValue(Params, 'output_path');
-    OutputPath := StringReplace(OutputPath, '\\', '\', -1);
 
     ResetParameters;
     If OutputPath <> '' Then
@@ -1927,7 +1905,6 @@ Var
     WrittenOK : Boolean;
 Begin
     OutputPath := ExtractJsonValue(Params, 'output_path');
-    OutputPath := StringReplace(OutputPath, '\\', '\', -1);
     Fmt := ExtractJsonValue(Params, 'format');
     Width := StrToIntDef(ExtractJsonValue(Params, 'width'), 1920);
     Height := StrToIntDef(ExtractJsonValue(Params, 'height'), 1080);
@@ -2035,7 +2012,6 @@ Var
     I : Integer;
 Begin
     OutJobPath := ExtractJsonValue(Params, 'outjob_path');
-    OutJobPath := StringReplace(OutJobPath, '\\', '\', -1);
 
     { If no path given, find first OutJob in the focused project }
     If OutJobPath = '' Then
@@ -2129,7 +2105,6 @@ Var
     I : Integer;
 Begin
     OutJobPath := ExtractJsonValue(Params, 'outjob_path');
-    OutJobPath := StringReplace(OutJobPath, '\\', '\', -1);
     ContainerName := ExtractJsonValue(Params, 'container_name');
 
     If ContainerName = '' Then
@@ -2287,7 +2262,6 @@ Var
     KindStr : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -2393,7 +2367,6 @@ Var
     VariantsJson, RowsJson, CellsJson, Desig, Kind : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -2493,7 +2466,6 @@ Var
     Variant : IProjectVariant;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -2529,7 +2501,6 @@ Var
 Begin
     VariantName := ExtractJsonValue(Params, 'variant_name');
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     If VariantName = '' Then
     Begin
@@ -2586,7 +2557,6 @@ Begin
     VarName := ExtractJsonValue(Params, 'name');
     VarDesc := ExtractJsonValue(Params, 'description');
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     If VarName = '' Then
     Begin
@@ -2692,7 +2662,6 @@ Var
     First : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -2758,7 +2727,6 @@ Var
     First : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     SearchText := ExtractJsonValue(Params, 'search_text');
     SearchBy := ExtractJsonValue(Params, 'search_by');
 
@@ -2842,7 +2810,6 @@ Var
     FirstPin, Found : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     Designator := ExtractJsonValue(Params, 'designator');
 
     If Designator = '' Then Begin Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'designator is required'); Exit; End;
@@ -2930,7 +2897,6 @@ Var
     EnvelopeData, ResponseStr : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
     DesigStr := ExtractJsonValue(Params, 'designators');
 
     If DesigStr = '' Then
@@ -3071,7 +3037,6 @@ Var
     Project : IProject;
 Begin
     SourcePath := ExtractJsonValue(Params, 'source_path');
-    SourcePath := StringReplace(SourcePath, '\\', '\', -1);
 
     If SourcePath = '' Then Begin Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'source_path is required'); Exit; End;
     If Not FileExists(SourcePath) Then Begin Result := BuildErrorResponse(RequestId, 'FILE_NOT_FOUND', 'Source file not found: ' + SourcePath); Exit; End;
@@ -3256,7 +3221,6 @@ Var
     Data : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -3397,7 +3361,6 @@ Var
     Ok : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -3475,7 +3438,6 @@ Var
     Ok : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -3538,7 +3500,6 @@ Var
     First : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -3702,7 +3663,6 @@ Var
     HierMode : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace'); Exit; End;
@@ -3803,7 +3763,6 @@ Begin
     End;
 
     ProjectPath := ExtractJsonValue(Params, 'project_path');
-    ProjectPath := StringReplace(ProjectPath, '\\', '\', -1);
 
     If ProjectPath <> '' Then
         Project := FindProjectByPath(Workspace, ProjectPath)

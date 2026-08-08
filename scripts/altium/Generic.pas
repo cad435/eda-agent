@@ -344,7 +344,8 @@ Var
     L : ISch_Line;
     Matched : Boolean;
 Begin
-    { GOTCHA observed 2026-05-16: callers using modify_objects / batch_modify }
+    { Measured on a live document: callers using modify_objects /             }
+    { batch_modify                                                            }
     { with a pipe-combined set like `Location.X=200|Orientation=2` on an ePin }
     { saw Location.X take effect but Orientation silently dropped. Writing    }
     { Location on a pin triggers a re-layout that can snapshot the previous   }
@@ -1027,7 +1028,6 @@ Var
     JsonItems, SavedStr : String;
     IsMutating, Saved : Boolean;
 Begin
-    DocPath := StringReplace(DocPath, '\\', '\', -1);
 
     // Do NOT RunProcess Client:OpenDocument, that loads the file but
     // strips any project association, producing a "free document" in the
@@ -1105,13 +1105,11 @@ Begin
     Begin
         ScopeType := 'doc';
         ScopePath := Copy(Scope, 5, Length(Scope));
-        ScopePath := StringReplace(ScopePath, '\\', '\', -1);
     End
     Else If Copy(Scope, 1, 8) = 'project:' Then
     Begin
         ScopeType := 'project';
         ScopePath := Copy(Scope, 9, Length(Scope));
-        ScopePath := StringReplace(ScopePath, '\\', '\', -1);
     End
     Else If Copy(Scope, 1, 14) = 'lib_component:' Then
     Begin
@@ -2083,7 +2081,6 @@ Begin
         Exit;
     End;
 
-    FilePath := StringReplace(FilePath, '\\', '\', -1);
 
     Workspace := GetWorkspace;
     If Workspace = Nil Then
@@ -4587,7 +4584,6 @@ Var
     Img : ISch_GraphicalObject;
 Begin
     ImagePath := ExtractJsonValue(Params, 'image_path');
-    ImagePath := StringReplace(ImagePath, '\\', '\', -1);
     X := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
     Y := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
     W := StrToIntDef(ExtractJsonValue(Params, 'width'), 500);
@@ -4650,7 +4646,6 @@ Begin
     Designator := ExtractJsonValue(Params, 'designator');
     NewLibRef := ExtractJsonValue(Params, 'new_lib_ref');
     NewLibrary := ExtractJsonValue(Params, 'new_library');
-    NewLibrary := StringReplace(NewLibrary, '\\', '\', -1);
 
     If Designator = '' Then
     Begin
@@ -8365,7 +8360,7 @@ Var
     Total, ClearedSrc, Synced : Integer;
     SrvDoc : IServerDocument;
 Begin
-    SheetPath := StringReplace(ExtractJsonValue(Params, 'sheet_path'), '\\', '\', -1);
+    SheetPath := ExtractJsonValue(Params, 'sheet_path');
     DesigCsv := ExtractJsonValue(Params, 'designators');
     FlagStr := ExtractJsonValue(Params, 'clear_source_library');
     ClearSrc := Not ((FlagStr = 'false') Or (FlagStr = 'False') Or (FlagStr = '0'));
