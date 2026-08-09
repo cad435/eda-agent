@@ -1,6 +1,6 @@
 # eda-agent
 
-MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**, with KiCad available as an additional backend. It exposes around 400 tools on Altium, and 480+ with both backends registered, covering schematic, PCB, library, project, and design-agent operations, over a persistent DelphiScript bridge for Altium (or KiCad's own IPC API). The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch. The [backend](#eda-backends-altium--kicad) is selected at startup, so an Altium user and a KiCad user each see only their tool set.
+MCP server that lets an AI (or any MCP-compatible client) **interact with a live Altium Designer session**, with KiCad and EasyEDA Pro available as additional backends. It exposes around 400 tools on Altium, covering schematic, PCB, library, project, and design-agent operations, over a persistent DelphiScript bridge. The AI reads the design you currently have open, asks questions about it, and can modify it in place while you watch. The [backend](#eda-backends) is selected at startup, so each user sees only their own tool set.
 
 > **⚠️ Experimental.** Not all tools are extensively tested. Some can crash the Altium DelphiScript engine. See [Known limitations](#known-limitations) before using on any design you haven't backed up.
 
@@ -36,6 +36,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
 - **Bulk batch primitives**: `obj_batch_modify`, `obj_batch_create`, `obj_batch_delete`, `pcb_place_tracks`, `pcb_move_components`, `sch_place_wires`, `place_net_labels`, `place_power_ports`, `sch_place_components`, `sch_set_components_parameters`, `get_sch_doc_pins`, `lib_add_pins`, `proj_get_connectivity_many`, `sim_attach_primitives`. Collapse N LLM turns + N IPC round-trips into one. Typical wall-time savings: 10 to 100x on multi-item edits
 - **Design review snapshot**: `design_review_snapshot` bundles 8 to 12 review reads (project info, components, nets, rules, diff, messages, stats, unrouted, BOM) into a single call. One LLM turn instead of a dozen
 - **Design-lint sweep**: `design_lint_report` runs 31 audit checks in one IPC pass and returns a structured violation list - schematic-side (component-parameter visibility per class, power-port orientation, floating ports, multi-output / no-driver nets, duplicate designators, off-grid components) and PCB-side (DNP variant components, tented-via ratio, near-miss track endpoints, signal vias without nearby return via, via antennas, removed pad shapes, components outside outline, pads too close to board edge, invalid polygon regions, optional DRC). Each check is also exposed as a standalone `audit_*` MCP tool; the dashboard's Status → Health subtab has a one-click Lint panel that calls `/api/lint` and groups results by Schematic / PCB
+- **Canonical circuit blocks**: `design_add_circuit_block` folds a whole block into a `DesignPlan` in one call, allocating refdes, wiring every pin to the right net and tagging power / ground and roles. Twelve of them: `decoupling`, `pullup`, `pulldown`, `series_resistor`, `voltage_divider`, `rc_lowpass`, `rc_highpass`, `led_indicator`, `crystal`, `pi_filter`, `mosfet_low_side`, `mosfet_high_side`. Naming-agnostic: you supply the part identities, it owns only the wiring pattern. `design_list_circuit_blocks` returns each one's parameter contract, so the planner never guesses a parameter name
 - **Datasheet-first discipline**: every component-surfacing response (`pcb_get_components`, `proj_get_bom`, `proj_get_component_info`, `proj_find_component`, `lib_search`, `design_review_snapshot`, `sim_get_readiness`) carries a `_datasheet_guidance` block with per-part vendor search queries. `app_attach` / `app_ping` carry a `_system_reminder` so every MCP client that connects sees the rule at session start. LLM-fabricated datasheet values are forbidden; WebFetch/WebSearch are called out by name
 - **Sch <-> PCB netlist crossref**: `crossref_net(net_name)` compares the schematic pin list against the PCB pad list for the same net. Catches ECO drift, stale post-fabrication routing, phantom nets from port/sheet-entry rename conflicts. `in_sync` flag + `sch_only` / `pcb_only` diff
 - **SPICE simulation workflow**: `sim_get_readiness` audits every component and partitions into ready / needs-primitive / needs-file. `sim_attach_primitives` sets SpicePrefix + Value on passives. `sim_attach_model` links a vendor `.mdl` / `.ckt`. `sim_run` dispatches the simulator. Built-in guardrail: never fabricate a SPICE model file, fetch the vendor one
@@ -63,7 +64,7 @@ This is **not** a batch tool that opens a project, runs a script, and exits. It'
   - **Altium Designer** (recent versions, AD20+ preferred) - Windows only
   - **KiCad 9+** with the IPC API server enabled (Preferences → Plugins → KiCad API server), plus `pip install -e .[kicad]`
 
-The server picks a backend at startup (`EDA_AGENT_BACKEND`, default `altium`), so one install drives either tool. See [EDA backends](#eda-backends-altium--kicad).
+The server picks a backend at startup (`EDA_AGENT_BACKEND`, default `altium`), so one install drives any of them. See [EDA backends](#eda-backends).
 
 ## Installation
 
@@ -115,102 +116,21 @@ From then on, every Altium startup compiles the script project and the polling l
 
 The polling loop starts and your MCP client can drive Altium.
 
-## EDA backends (Altium / KiCad / EasyEDA)
+## EDA backends
 
-The server exposes one tool surface, chosen at startup by the `EDA_AGENT_BACKEND` environment variable (or the `--backend` flag):
+One tool surface, chosen at startup by `EDA_AGENT_BACKEND` (or `--backend`).
 
-- `altium` (default) - the full Altium suite. Existing installs are unaffected.
-- `kicad` - the KiCad-native tools.
-- `easyeda` - EasyEDA Pro, through its extension API.
-- `both` - Altium and KiCad together, for one server driving either.
+| Backend | Reached through | Status |
+|---|---|---|
+| `altium` | a persistent DelphiScript bridge | default, most complete |
+| `kicad` | KiCad's IPC API and `kicad-cli` | optional |
+| `easyeda` | a browser extension you import into EasyEDA Pro | optional |
 
-`both` deliberately excludes `easyeda`. It exists for the two desktop tools a user is likely to run side by side, and widening it would change what an existing setting means.
+The EasyEDA connection runs the other way round: the editor dials out to
+this server, so nothing here can start it or make it connect.
 
-Selection happens before any tool registers, so an `altium` user never sees KiCad tools and vice versa. Because MCP clients set environment per server, a user of several tools registers several servers pointing at the same binary:
-
-```bash
-claude mcp add -s user altium eda-agent
-claude mcp add -s user kicad -e EDA_AGENT_BACKEND=kicad eda-agent
-claude mcp add -s user easyeda -e EDA_AGENT_BACKEND=easyeda eda-agent
-```
-
-### EasyEDA connects the other way round
-
-Altium polls a directory for request files, so the server writes and waits. **EasyEDA dials out instead.** Its extension API reaches a WebSocket server (`SYS_WebSocket.register`), so this process listens and the editor connects to it. Nothing here can start EasyEDA or make it connect; until the extension does, every call reports the source as unreachable and says how to start it.
-
-That means two halves, and both ship here:
-
-- the Python side, which binds the first free port in **49620-49629** and answers `GET /health` with a service identifier (`EDA_AGENT_EASYEDA_HOST` / `EDA_AGENT_EASYEDA_PORT` override it)
-- `extensions/easyeda/main.js`, loaded in EasyEDA Pro, which answers the commands
-
-The WebSocket server is written in-house against RFC 6455 rather than pulled in as a dependency, for the same reason the s-expression reader and the EasyEDA part converter were: the framing rules end up verified instead of trusted. The handshake is tested against the specification's own worked example, so the expected value is fixed by the standard rather than by this code. It binds to loopback and is not hardened for a hostile network.
-
-**Neither side needs a port configured.** The server takes the first free port in 49620-49629, the range EasyEDA's own bridge uses, and the extension scans that range, reads `/health`, and checks the service identifier before connecting so it never hands a WebSocket handshake to an unrelated service. It then **retries every few seconds**, which is the part that matters: `SYS_WebSocket.register()` fails silently when nothing is listening at that instant and never tries again, so without a retry a correct extension and a correct server can sit side by side and never meet. Starting order no longer matters.
-
-Failures are three-way on purpose, because they need different responses: `unavailable` means start the extension, `reason` means the editor refused the command, `ok` means it ran.
-
-**Nothing here has run inside EasyEDA Pro.** Every API name comes from EasyEDA's published reference rather than recollection, including the instance naming, where class `PCB_Drc` is reached as `eda.pcb_Drc` and getting the case wrong yields `undefined` rather than an error. But the command vocabulary has never round-tripped against a live editor, so the bridge publishes `verified_live: false` and every tool result carries it. A clean load is the first test, not confirmation.
-
-Tools that rewrite or discard work (`easyeda_clear_routing`, `easyeda_auto_route`, `easyeda_delete_primitives`, `easyeda_delete_schematic_primitives`, `easyeda_import_schematic_changes`, `easyeda_set_copper_layer_count`) refuse unless `confirm=True`, and **both halves check independently** since the extension is reachable by anything speaking the protocol. The last two are guarded for reasons that are not obvious from their names: applying the schematic to the board removes components the schematic no longer has, along with their routing, and reducing the copper layer count discards whatever was on the layers that go away.
-
-**Every coordinate is in mils**, as everywhere else here. That matters more on this backend than it looks: EasyEDA's PCB canvas counts in mils but its schematic canvas counts in units of 0.01 inch, ten mils, and their own guidance calls mixing the two the most common mistake made against this API. It lasts because nothing errors, a schematic sent unconverted just lands ten times too far out. The conversion happens once, in `MILS_PER_SCHEMATIC_UNIT`, rather than at each call site.
-
-Layers cross the wire as **names**, never numbers. EasyEDA's layer ids are a numeric enum and their own guidance is to use the members rather than the values, so `easyeda_add_line(layer="TOP_SILKSCREEN")` sends the name and the extension resolves it against the runtime's enum. A number chosen on the Python side would be a second copy of their numbering, and it would fail quietly: the primitive would land on a different layer rather than be rejected.
-
-### What EasyEDA can and cannot do here
-
-**It can read, check and export.** Components, nets, pads, vias, layers, attributes, dimensions, schematic pages and pins, the editor's own DRC and ERC, library and LCSC lookups, a rendered image, and every fabrication export including IPC-2581 and an Altium file. The EDA-agnostic analysis (`review_design`, `run_drc`, `run_erc`, the calculators, `design_validate_plan`, `design_review_plan`) works on it too, because those need a snapshot rather than a particular editor.
-
-**It can author library parts.** Symbols, footprints and the **device** that binds them, which is the object anything gets placed from. Geometry comes from opening the item (`easyeda_open_symbol` / `easyeda_open_footprint`) and then using the ordinary drawing tools, which now act on it. `easyeda_add_pad` and `easyeda_add_pin` are what make the two halves usable rather than merely drawn: lines and arcs give a footprint an outline, and only pads give it something to solder, just as only pins make a symbol connectable. SMD or through-hole is decided by the drill diameter, and a drill as wide as the pad is refused, since it leaves no annular ring while still rendering as a pad. A pin's `x, y` is its **electrical end**, the point a wire attaches to, not the end at the symbol body. Devices, symbols and footprints can each be copied into another library, which is how a vendor part gets adopted: copy it into your own library and edit the copy, so an update to the vendor library cannot silently change your board. Copying only the symbol and footprint leaves nothing placeable, since the device is the object that gets placed. There is no separate library-drawing API on this backend, and inventing one would be a second way to draw the same shapes. Creating the two drawings and stopping leaves a library nobody can place from, so a device bound to neither is refused rather than accepted with a uuid. This is where the atomic-parts standard lands on this backend: symbol, footprint and 3D model bound at the part level. For the common shapes there is a shorter road: `easyeda_create_ic_symbol` lays out a whole IC symbol from left and right pin groups, `easyeda_create_passive_symbol` draws a resistor or an inductor, and `easyeda_create_standard_footprint` computes a chip, sip, dual, header, tab, quad or bga land pattern. All three share the geometry modules the Altium backend uses, so a part generated on either side comes out the same. The passive generator refuses the capacitor, diode, LED, crystal and fuse glyphs: they are drawn from open line segments and EasyEDA's schematic API has no line primitive, so the only way to draw them would be as wires, which would give the symbol electrical connections it should not have. A generated land pattern is a starting point computed from the numbers given, not one read from a datasheet, and should be checked against the manufacturer's recommendation before it reaches a board.
-
-**It can draw.** On the board: lines, arcs, polylines, vias, pads, text, poured copper zones, solid fills and keepout regions, plus deletion by id and selection. A fill and a zone are not the same thing: a fill is solid and shorts whatever is inside it on another net, while a zone pours around what it meets. A region takes its rules with no default, because a region with no rule constrains nothing and looks exactly like one that works. A copper line on `TOP`, `BOTTOM` or an inner layer is a routed segment, since EasyEDA has no separate track primitive. On the schematic: wires, text, rectangles, circles and polygons, plus net labels and power/ground rail glyphs, and selection. Library parts are placed on either by the uuid pair a search returns, never by name, because two libraries can hold the same name and choosing one silently is how a board gets the wrong footprint under a BOM line that reads correctly.
-
-**It can start from nothing.** Create a project, a schematic, extra schematic pages and a board, then fill in the title block, and organize the result: `easyeda_get_team`, `easyeda_list_folders`, `easyeda_create_folder` and `easyeda_move_project_to_folder` manage the workspace's project folders, with signatures taken from the installed `api-types.d.ts` rather than guessed. Without those, the backend can only work on something a human made first, which is the difference between editing a design and authoring one.
-
-**It is verified against a live editor, per command.** The first real sessions ran against a board of 111 components: 20 of 65 editor commands round-tripped with usable data, and the record keeps each reply's field names plus a truncated example value. `easyeda_get_measured_shapes` reads that record back as a tool, which is where to look before writing anything against a reply field, because a guessed field name does not fail loudly; it reads nothing and reports a clean empty. Every tool reply carries `verified_live` **for the command it used**, from that record: a tool built on `pcb.components` reports true, one built on `pcb.attributes`, which hung live, reports false, and one good session is not allowed to launder the rest. The same sessions established that `sch.*` reads fail inside the editor unless the schematic tab is active, so the smoke run sets wrong-tab probes aside by name rather than reporting them as breakage.
-
-**Exports produce real files.** The editor's manufacture exports return file data, a Blob, and `JSON.stringify(blob)` is `{}`, which is why every export once arrived empty. The extension now packs the bytes as chunked base64, and every export tool (`easyeda_export_gerber` and its eighteen siblings) takes `save_to` and writes them to disk, reporting the path, size and suggested name. Refusals are specific: no destination names the file's size, and a null file names the usual cause, the wrong document tab. `easyeda_export_bom_html` is the exception and is named separately here because it behaves differently: it asks the editor for nothing, rendering a self-contained page from the design snapshot, so it takes `output_path` and defaults to `bom.html` in the workspace rather than refusing without one.
-
-**It has a safety net.** `easyeda_checkpoint` saves the open document and `easyeda_restore_checkpoint` puts it back, which is worth doing before `easyeda_run_plan` or any confirm-guarded tool. The Altium side snapshots a whole project directory; this backend has no directory the server can reach, so what is saved is the one open document, and the tools say so rather than implying a project-wide net. A restore onto a *different* document is refused: replacing board B with a snapshot of board A destroys B and reports success, which is the worst shape a safety net can fail in.
-
-**Bulk edits go in one call.** `easyeda_modify_schematic_components` and `easyeda_modify_pcb_components` take a list, and the loop runs inside the editor: renumbering forty parts through the single-component tool would be forty round trips over a socket. A malformed entry is rejected before any of the batch is applied, since finding it halfway leaves the design part-edited, and each result is reported individually because knowing *that* something failed is no use without knowing which.
-
-**It can cross-check itself.** `easyeda_get_unconnected_pins` names the pins sitting on no net rather than counting them, `easyeda_compare_schematic_pcb` compares the two component lists by designator in both directions, `easyeda_audit_track_widths` reports nets routed at more than one width, per net **per layer**, since a net legitimately changes width moving between an inner layer and an outer one and folding the layers together would flag every multi-layer board. It reports rather than judges: a deliberate taper into a fine-pitch pad looks exactly like a segment drawn before a rule was set. `easyeda_audit_mirrored_text` finds bottom-side text that will read backwards on the real board, which is the defect nothing on screen shows: the editor draws the board from the top, so unmirrored bottom silkscreen looks correct there and comes back from the fab reversed. `easyeda_audit_components_outside_outline` casts a ray against the outline segments rather than comparing against an extent, because a bounding box calls the missing corner of an L-shaped board part of the board, and it works on segments in any order since an edited outline has them in whatever order they were touched. `easyeda_audit_off_grid_components` reports how far each part sits from the nearest grid line (the offset to the *nearer* line, not past the last one, or a part a hair short of the next reads as nearly a full pitch out), and `easyeda_audit_pads_near_board_edge` and `easyeda_audit_vias_near_board_edge` measure to the outline **segments** rather than to a bounding box. That last distinction matters in the dangerous direction: a box overstates a rounded or routed-out board, so a pad close to a real curved edge reads as comfortably inside it and the check misses exactly what it exists to find. Pad size is a separate limit, since EasyEDA carries it in an unpublished shape object, so each result says whether it was measured copper-to-edge or centre-to-edge and the summary counts them. Those two compute rather than forward, which the rest of the backend avoids: the line is whether the editor has an answer of its own. DRC and ERC do, so those are always the editor's. Neither of these exists in EasyEDA's API at all, and the only thing close to a comparison is `import_schematic_changes`, which *applies* the schematic rather than reporting on it, so running it to find out what differs would change the board to answer a question about it.
-
-**Connecting has one prerequisite that looks like a broken bridge.** EasyEDA refuses network access to extensions until external interaction for extensions and standalone scripts is permitted, and until that setting is on the editor never attempts a socket at all. Nothing on this side can tell that apart from an editor that is simply closed, because there is nothing to observe: the server listens, no connection arrives, and every tool correctly reports that no editor is connected. The error naming the permission is raised inside EasyEDA and is the only place it appears. So the order that works is: enable the permission, import the `.eext` at a bumped version, then click onto a PCB or schematic tab and connect. That last step is not pedantry either. Re-importing an extension leaves the editor on its settings page, and a first connect from there reports the document as `unknown`, as do library, symbol, footprint and project-home tabs, because EasyEDA only injects the `pcb_*` and `sch_*` API into a design document.
-
-**It tells you when the editor is running old code.** An extension that is installed, enabled and months out of date is indistinguishable from a current one in EasyEDA's Extensions Manager: same name, same uuid, and a size nobody thinks to check. So the build is a hash of the extension source, stamped at build time, reported on every `easyeda_ping`, and compared against what the server's own tree would build. A mismatch names both builds and the remedy, including the part that wastes the most time: re-importing the **same version number** is a silent no-op, so the version in `extension.json` has to be bumped first. This is not housekeeping. A whole live session was spent reading "the export fix is broken" off an editor that was simply running a build from before the fix, and the only clue was one unrelated command being refused. Not knowing is reported as not knowing: an older extension that predates the stamp reports no build, and is never accused of being stale on that basis. A test also refuses to let the built package fall behind its own source, because editing the source and shipping yesterday's `.eext` produces exactly the same confusion one step earlier.
-
-**One audit checks the part rather than the board.** `easyeda_audit_footprint_vs_datasheet` compares the open footprint's real pads against a land pattern transcribed from the manufacturer datasheet: pad count, each pad's position and size, the numbering, the implied pitch. Every other audit here checks the design; this checks what the design is built on, and it catches the defect none of the others can see, since a board can be perfectly placed and perfectly routed onto a land pattern that will not solder. The comparison is the same code the Altium side runs, so the two backends cannot drift into disagreeing about whether a given footprint matches a given datasheet; only the reading differs, and the pads are converted from the mils EasyEDA reports to the millimetres a datasheet gives. The spec must cite the datasheet it came from, and there are no built-in package tables, on purpose.
-
-**A review reads the design before it judges it.** `easyeda_review_snapshot` returns what the design IS in one call: the netlist, the parts on both sides, the nets with their classes and rules, the layer stack, what is unrouted, which pins sit on no net, and whether board and schematic agree. Connectivity is judged from that and never from a render, because a picture can show a wire that shares no net and hide a net that is electrically correct. DRC and ERC are opt-in, since each can take a minute and a reviewer wanting the cheap picture should not pay for them. A section that could not be read is listed as failed rather than returned empty: those look identical in a summary and mean opposite things, and a reviewer acting on the first when it was really the second concludes the board is clean.
-
-**One call runs every check.** `easyeda_review_board` runs every audit over a single snapshot of the board and ranks what they found, worst first. Two things about it are load-bearing. The audit list is read from the registry rather than written down, because a written list goes stale the first time an audit is added and nothing says so, and silently reviewing all-but-one of the checks is the exact failure a review tool must not have. (This paragraph counted them until the count went stale within a day, which is the same lesson one level up.) And the reply keeps four outcomes apart: found something, ran and found nothing, **refused** (no board open), and **unreadable** (answered in a shape the summary cannot read). Only the second is good news. An audit whose count cannot be read is never folded into the clean tally, since a count nobody read is not a count of zero. Making that safe meant first getting the audits to agree on a name for their result: they had grown twelve different ones, and several of the near-misses (`segments_counted`, `vias_counted`) are how much was *inspected*, so a summary matching loosely on `_count` would have called a clean 813-segment board 813 problems. The reads are shared across the review, because four audits read the board's lines and several read its vias, and the cache is dropped when the review ends rather than living on to answer a later audit with an older board.
-
-**It checks decoupling with the Altium engine, not a copy of it.** `easyeda_audit_missing_decoupling` feeds measured EasyEDA components into the same function the Altium audit calls, so an IC lands in the same bucket on either backend. A missing local bypass passes ERC, passes DRC, and bites at first power-on. One limitation is stated rather than hidden: a PCB pad carries a number but no pin *name*, so power pins are recognised by net name alone, and an IC whose rails are named unusually is **skipped rather than judged**. `easyeda_audit_signal_vias_without_return` is the same kind of port, using the Altium side's power-net vocabulary character for character so the two backends flag the same boards.
-
-**It can set design rules and manage the stackup.** Net classes, differential pairs and equal-length groups, plus reading the per-net rules and which rule configuration is active. Layers can be renamed, restyled, shown, hidden, locked and selected, and the copper layer count changed, which is guarded: reducing it discards whatever was on the layers that go away. That last one matters for reading a DRC result: a board can hold several rule sets, so a violation count means nothing without knowing which was in force. Where a colour is optional it is left to the editor rather than defaulted here, so creating a group cannot silently restyle a board.
-
-**The routing tools are not registered here, and that is measured rather than assumed.** `route_plan_repairs` is pure Python and looks portable, but it reads each violation's nets from `primitive1` / `primitive2`, the paired-primitive structure Altium's DRC reports. EasyEDA's DRC returns a flat `{description, net, designator, layer}` with no primitives, so fed a real EasyEDA payload the planner classifies part of it and escalates the rest for want of net names that are present but in a different place. The output would be honest and useless. `route_plan` has a second problem: its `fetch_geometry` option calls the Altium bridge, so on this backend that parameter talks to the wrong tool entirely.
-
-**The plan-building design tools work here now.** Building, editing, laying out, validating and costing a plan are all pure computation, and on this backend they have somewhere to go: `easyeda_emit_plan` turns a plan into EasyEDA calls and `easyeda_run_plan` runs them. Which tools qualify is **measured, not judged by name**: each was called with the Altium bridge replaced by a tripwire, and a test re-runs that measurement so the list cannot go stale. `design_preview_plan` is the reason it is measured, since it reads like pure computation, reaches the bridge, and catches the failure, so on a machine with no Altium it answers with less than it appears to and says nothing.
-
-**The Altium executor stays Altium-only.** `design_execute_plan` emits Altium bridge commands (`generic.place_sch_components_from_library` and friends), not an abstract vocabulary, so it would fail here at the first step. Exposing it would raise the tool count and hand you a dead end, which is the same trap the part providers' `usable_in` check exists to prevent. On this backend a plan is run through `easyeda_emit_plan` and `easyeda_run_plan` instead.
-
-`easyeda_emit_plan` covers the placement half. It takes a validated DesignPlan, runs the same layout engine the Altium path uses, and returns the ordered list of `easyeda_*` calls as **data** rather than running them, so the sequence can be read and checked first.
-
-Two things it refuses to do, both because the failure would be invisible:
-
-- **It never picks a library part.** Altium resolves a symbol by name; EasyEDA needs the `{library_uuid, uuid}` pair a search returns, and one MPN can match several parts. A wrong pick leaves the designator, value and BOM line all reading correctly while the footprint is somebody else's. Unresolved parts come back as search steps with `runnable: false`.
-- **It emits placement only.** A wire or net label is drawn *at* a pin, and pin positions are not known until the symbols are placed. The result says so, rather than letting a placed design be mistaken for a wired one.
-
-`easyeda_emit_connections` is the second pass. Give it the pin coordinates read back from the editor and it emits the wires, labels and rail glyphs. How each net is drawn (wired pin to pin, labelled at every pin, or a power/ground glyph) comes from the **same rule the Altium path uses**, imported rather than restated, so the two backends cannot drift into drawing one plan two ways.
-
-A net missing any pin position is refused outright rather than drawn between the pins that are known: a partly drawn net reads as a working one, and on the label path it genuinely connects the pins it reached, so nothing downstream flags it.
-
-`easyeda_run_plan` executes an emitted sequence. It takes the `calls` list rather than a plan, so what runs is exactly what was reviewed, and it **stops at the first failure**: carrying on would place the remaining parts around the hole where the failed one belongs, and the result would read as a finished schematic with a mistake in it rather than as a run that stopped. A step naming a tool it cannot call is refused before anything runs, since finding that halfway leaves the design half-changed.
-
-So: **use EasyEDA here to inspect, check and get data out.** Altium remains the backend that builds.
+Full detail, including what differs between them and what each one
+cannot do, is in [`docs/BACKENDS.md`](docs/BACKENDS.md).
 
 ## Tool count (clients that cap it)
 
@@ -245,256 +165,16 @@ argument names - some are not what they look like (`current_amps`, not
 `current_a`), and the same tool can differ between backends. Prefer `full`
 (the default) unless your client forces otherwise.
 
-## Part sourcing (multiple providers, none default)
+## Part sourcing
 
-`part_search` queries **every** enabled part provider and merges the results,
-each hit attributed to the source that found it. `part_fetch` then pulls one
-part's detail from a provider you name.
+`part_search` queries every enabled provider and merges the results, each
+hit attributed to the source that found it; `part_fetch` then pulls one
+part's detail from a provider you name. **No provider is enabled by
+default**, and there is no fallback order, so a result always names its
+source.
 
-Sources come in **two kinds**, merged into one result but never conflated. A
-**library** provider yields geometry you can place. A **catalogue** provider
-yields part identity, a datasheet and stock, and no geometry at all. Every hit
-carries its `kind`, because discovering that a distributor hit has no symbol
-after picking the part is the expensive way to learn it. They are not tiers and
-neither is a fallback for the other: a catalogue tells you *which* part to use
-and hands you the datasheet every check here measures against, and a library
-tells you whether you can draw it.
-
-| Provider | Kind | What it is | Network | Credential |
-|---|---|---|---|---|
-| `altium_local` | library | The `.SchLib` libraries already on this machine. The only source that answers whether you **already own** a part, which is what stops an import creating a second symbol with a slightly different name. Reads the OLE files directly, so it works with Altium closed. Nothing to download: a hit is already an Altium symbol. Point it with `EDA_AGENT_ALTIUM_LIBRARIES` | no | no |
-| `digikey` | catalogue | Digi-Key's catalogue: MPN, datasheet, lifecycle and live stock. Needs an OAuth client from their developer portal via `DIGIKEY_CLIENT_ID` and `DIGIKEY_CLIENT_SECRET` | yes | yes |
-| `easyeda` | library | EasyEDA / LCSC component data. Fetch by LCSC part number works; **search is unavailable** because the upstream endpoint was withdrawn | yes | no |
-| `element14` | catalogue | element14 (Farnell, Newark): MPN, datasheet and stock. Needs `ELEMENT14_API_KEY`; `ELEMENT14_STORE` picks the regional storefront, which changes the catalogue you see | yes | yes |
-| `kicad_local` | library | The libraries KiCad installed on this machine. A fetch resolves the symbol's footprint reference against the installed `.pretty` libraries and the footprint's model reference against the `3dmodels` tree, so a hit can be a whole part with a 3D body (18003 of the 22728 symbols shipped with KiCad 10.0.1 name a footprint). No MPN or datasheet for most entries | no | no |
-| `mouser` | catalogue | Mouser's catalogue: MPN, datasheet and stock. Needs `MOUSER_API_KEY` | yes | yes |
-| `nexar` | catalogue | Nexar, the API behind Octopart: aggregates offers across many distributors at once. Needs `NEXAR_CLIENT_ID` and `NEXAR_CLIENT_SECRET` | yes | yes |
-| `partreel` | library | An open registry of verified KiCad parts, no login and no key: `/api/v1/parts.json` serves 21,657 parts. Yields KiCad files, usable in Altium through `lib_kicad_import`. Points at PartReel the way the Digi-Key client points at Digi-Key; `PARTS_REGISTRY_URL` redirects it at any API-compatible registry, since the API shape is the contract rather than the host. Run by a third party, proposed in issue #12 by its operator | yes | no |
-| `public_libraries` | library | Openly published KiCad libraries, no login and no key: KiCad's own 12,011 footprints, Digi-Key's 936, and JLCPCB's 20 symbol libraries plus footprints. Mostly **land patterns rather than symbols**, which is what you want once the part is chosen but its geometry is not. Indexed through GitHub's documented API, one request per repository, cached on disk for a week. `EDA_AGENT_CACHE_DIR` relocates the cache | yes | no |
-| `tme` | catalogue | TME: MPN, datasheet and stock, strongest on European availability. Requests are HMAC signed; needs `TME_TOKEN` and `TME_SECRET`, and `TME_COUNTRY` selects the market | yes | yes |
-
-**No provider is a default and none is preferred.** All are searched equally,
-and the merged order is alphabetical by provider then part, which is not a
-relevance ranking: do not read the first hit as the best one. `part_fetch`
-requires the provider name rather than supplying one, so a fetch always states
-which source it trusts. Tests enforce this rather than leaving it to
-convention, because a default parameter or a preference sort would quietly make
-one source the answer to every query.
-
-A provider that cannot answer reports **why** instead of returning nothing.
-"The endpoint is gone" and "no such part exists" are different answers, and
-only one of them is a reason to stop looking.
-
-Select a subset with `EDA_AGENT_PART_PROVIDERS=kicad_local,altium_local` (the
-variable selects, it never ranks). `PARTS_REGISTRY_URL` names the registry the
-`partreel` client queries; there is no default, so that source stays off until
-you choose one. Call `part_search` with an empty query to list the providers
-and who operates them.
-
-**Four of the ten answer on a fresh install**, none of them needing a
-credential: `altium_local` and `kicad_local` read libraries already on disk,
-`partreel` queries an open registry, and `public_libraries` indexes openly
-published KiCad libraries from GitHub. That is deliberately more than one, so
-no single free source is load-bearing. The five catalogues each need their own
-credential and none ships with one, and EasyEDA's search endpoint was withdrawn
-upstream (fetch by LCSC part number still works). Every source that cannot answer reports itself unavailable, names the
-environment variable it wants, and says so per provider in the search result
-rather than folding into an empty list.
-
-A client pointing at its own service is not a preference: the Digi-Key client
-points at Digi-Key, and `partreel` points at PartReel. What neutrality means
-here is the absence of RANKING, and that is enforced by tests rather than left
-to intent. No source is consulted as a fallback when another returns thin
-results, none can reach the front of a merged list, and there is deliberately
-no "default provider" setting to point anywhere.
-
-**What was verified, and what was not.** Every catalogue endpoint above was
-probed live before it was written into the code: a 401 or 403 proves the host
-and path exist and refused only for lack of a credential. Three further
-candidates were probed and **dropped** for answering 404 on the recalled URL
-rather than being shipped as plausible guesses. What that probing could *not*
-establish, without a paid credential, is the request and response shapes. So
-every catalogue publishes `verified_live: false`, and the parsers are written
-to degrade a single hit on a renamed field rather than assume a shape and lose
-the whole search. The flag flips only when a client has actually run against
-the live API.
-
-**Access policy of the hosts, checked rather than assumed.** Every host these
-providers reach was checked for a `robots.txt` before anything was built
-against it. That check changed the design once: `gitlab.com/robots.txt` carries
-`Disallow: /api/v*`, and the GitLab API is where KiCad's canonical *symbol*
-repository lives, so `public_libraries` does not touch GitLab and serves
-footprints from GitHub instead. KiCad's symbols are already covered by
-`kicad_local`, which reads them off disk. GitHub's API is used as documented,
-with a User-Agent naming this project rather than impersonating a browser, one
-recursive request per repository instead of directory walking, a week-long disk
-cache so repeat searches cost nothing, and rate limiting treated as "back off"
-rather than "no results". PartReel's `robots.txt` allows all agents and names
-`ClaudeBot` and `GPTBot` explicitly. TrustedParts was evaluated and **dropped**:
-it returns 403 to non-browser clients, so access is by arrangement rather than
-open, and nothing here works around that.
-
-One measured behaviour is worth naming, because it is the failure this layer
-exists to prevent: **Mouser answers an invalid API key with HTTP 200** and an
-`Errors` array. A client that judged success by status code would report a
-rejected credential as a search that ran and found nothing. Payload-level error
-detection is in the shared base class, not in five copies, and a mutation test
-confirms removing it breaks the guard.
-
-Each hit carries `formats`, `usable_in` and `import_with`: the tool that turns
-that hit into a real part on the active backend. Those live on the provider,
-not on the part, so without them a result gives no way to tell a lead from a
-dead end. `import_with` is derived from the same map that gates a provider's
-Altium claim, so it can only ever name an importer that exists, and it comes
-back empty (never a guess) for a format nothing reads.
-
-A hit is a lead, not a verified part. The `provenance` and `license` fields
-report what the provider claims about where its geometry came from, and a blank
-means unknown rather than permissive. Audit any imported footprint against the
-manufacturer land pattern with `lib_audit_footprint_vs_datasheet` before
-trusting it.
-
-Pass `download_dir` to `part_fetch` to also write a provider's library files
-there (off by default, since it writes to disk). Only known artefact kinds are
-taken, and each is saved with the extension this code expects rather than one
-read out of the payload.
-
-Downloaded files are checked against the KiCad installed on this machine,
-because a registry can publish a **newer** s-expression format than your KiCad
-can open. Measured against the live service: PartReel ships format `20260206`
-while KiCad 10.0.1 writes `20251024`, and KiCad's symbol parser refuses the
-newer file outright ("Unable to load library") though its footprint parser
-accepts it. Any such file comes back with a `*_warning` naming both versions,
-rather than looking like a clean download.
-
-### Getting a KiCad-format part into Altium
-
-Two of the three providers publish KiCad format, so on the Altium side a hit
-would otherwise be a dead end. `lib_kicad_import` reads `.kicad_sym` and
-`.kicad_mod` and produces the same thing `lib_easyeda_import` does: with
-`target=altium`, an ordered plan of this server's own library tools, run by
-`design_execute_plan`. Altium's binary library formats are never synthesized.
-
-The two importers share one neutral geometry model and one Altium emitter, so
-they cannot drift apart: a fix to pad shapes or arc handling lands in both. The
-s-expression reader is written here rather than taken as a dependency, which
-keeps the escaping rules (a footprint named `2.5"`, a description containing
-parentheses) verifiable instead of trusted.
-
-Eight things about the format are silent when handled wrongly, and all eight
-produce something that still looks like a converted part:
-
-- **Derived symbols.** Over half of KiCad's standard entries (12209 of 22728 in
-  10.0.1) carry no geometry at all: they are `(extends "PARENT")` and inherit
-  the parent's pins and body, restating only the properties that differ. That
-  link is followed, with the child's own values winning and everything it does
-  not restate inherited. Not following it yields a part with no pins.
-- **Multi-part components.** A quad gate keeps each gate in its own unit, all
-  drawn at the same coordinates. They convert in one call to a real Altium
-  multi-part symbol (`part_count` plus per-pin `owner_part_id`), not to N
-  symbols to merge by hand; pass `unit=N` to take a single sub-part instead.
-  Merging units into a flat symbol would stack every unit's pins on the same
-  points and still look converted.
-
-  Supply rails come across whichever way the source expresses them. A symbol
-  that puts them in **unit 0** (shared by every unit; 678 unit-0 sub-symbols
-  in KiCad 10.0.1 carry pins) maps straight onto Altium's `owner_part_id=0`,
-  so a CD4001 becomes four gates sharing one Vdd/Vss. A symbol that gives them
-  their **own unit** instead keeps that structure, and a warning names the
-  shared alternative with the exact edit rather than silently reinterpreting
-  what the file says. Both forms are legitimate; only one of them is what the
-  file actually contains.
-- **Pin electrical type.** Carried across rather than flattened, because it is
-  what ERC reasons about: an open-collector output recorded as passive stops
-  ERC asking for its pull-up, and two of them driving one net stops being a
-  reported conflict. KiCad's `open_collector`, `open_emitter` and `tri_state`
-  map to Altium's `open_collector`, `open_emitter` and `hiz` (1827, 119 and
-  1858 pins respectively in KiCad 10.0.1). `no_connect` becomes passive, and
-  that one is a genuine gap rather than a choice: Altium's pin vocabulary has
-  no "not connected" (an unused pin carries a No-ERC directive instead).
-- **Hidden pins.** Kept, and kept hidden (5378 of the 106032 pin definitions
-  in KiCad 10.0.1 are hidden). Dropping them would lose real supply and
-  no-connect pins; showing them would clutter every symbol that hides them.
-  Both the modern `(hide yes)` and the older bare `hide` spelling are read,
-  since a library can predate the KiCad that opens it.
-- **Body styles.** `NAME_1_1` and `NAME_1_2` are the same unit drawn two ways
-  (KiCad's DeMorgan alternate), with the same pins. Taking both duplicates
-  every pin, so one style is converted and the other is reported.
-- **Rounded rectangle pads.** Used by 116 of the 206 SMD footprints sampled
-  from KiCad 10.0.1, and Altium supports the shape natively, so it is not
-  flattened to a plain rectangle. The corner value does not carry over
-  directly: Altium's
-  documentation defines its percentage against *half* the shortest pad side,
-  while KiCad's `roundrect_rratio` is measured against the *whole* shorter
-  side, so the conversion is a factor of two. Multiplying by 100 would halve
-  every corner radius and look entirely plausible.
-- **Y axis.** `.kicad_sym` is Y-up like the neutral model, `.kicad_mod` is
-  Y-down. A sign error mirrors the land pattern.
-- **Pin angles and arcs.** KiCad's pin angle already matches the neutral
-  convention and passes through untouched (EasyEDA's is 180 degrees off, and
-  the asymmetry is deliberate). Arcs are stored as start/mid/end, so the radius
-  and sweep are recovered from the circle through those three points.
-
-A local hit can also carry its **3D body**. KiCad ships STEP models and
-Altium's linker takes STEP, so `part_fetch` resolves the footprint's model
-reference against the installed `3dmodels` tree and `lib_kicad_import` adds a
-`lib_link_3d_model` step for it (while the `.PcbLib` is still the active
-document, which is where that tool has to run). The path has to be one that
-resolved: the tool loads the file, so a guess would either fail on execution or
-attach the wrong shape. An unresolved reference is reported instead.
-
-Generated KiCad files are checked against **KiCad's own parser** (`kicad-cli`),
-not just re-read by this code. That matters because this reader is lenient by
-design and a round trip through it cannot see output KiCad refuses: the writer
-once emitted two graphic-style tokens on an inverted pin, which read back as a
-merely-missing bubble here and as `Unable to load library` in KiCad. Those
-tests skip when KiCad is absent.
-
-Anything with no faithful Altium equivalent comes back in `warnings` rather
-than being quietly approximated. The library API takes one hole diameter and
-no plating flag, so a **slotted** drill is emitted round and an **unplated**
-hole is emitted plated: both are the right size and the wrong thing, and
-neither would show up anywhere downstream. Custom and trapezoid pads are
-emitted as their bounding rectangle.
-
-**Solder-paste and mask apertures are never emitted as pads.** Fine-pitch
-chip footprints subdivide paste with apertures that carry no copper (332 of
-the 6902 pads in KiCad 10.0.1's sampled libraries), and an Altium pad always
-carries copper, so emitting one would short the pads the aperture exists to
-subdivide. They are skipped because of their layer, not because they usually
-lack a designator, and reported as apertures with the advice to draw them as
-paste-layer regions.
-
-**Active-low and clock pin markers** are read but cannot be written. `ISch_Pin`
-has the slots (`Symbol_OuterEdge` for the inversion bubble, `Symbol_InnerEdge`
-for the clock wedge) and `lib_add_pins` has no field for either, so setting
-them needs a bridge change. They are reported per part rather than dropped
-silently, because an active-low pin drawn plain states the opposite of the
-truth. Both of KiCad's spellings count: `inverted` (the bubble) and `*_low`
-(IEEE's wedge) mean the same thing.
-
-These checks live in the shared emitter, so they apply to `lib_easyeda_import`
-too.
-
-Check the result against the manufacturer land pattern with
-`lib_audit_footprint_vs_datasheet` before using it.
-
-### KiCad
-
-KiCad support talks to a running KiCad over its own supported IPC API (`kicad-python`), so - unlike the Altium side - there are no scripts to install. Requirements: KiCad 9+, the API server enabled (Preferences → Plugins → KiCad API server), a board open in the PCB editor, and `pip install -e .[kicad]`.
-
-The KiCad backend covers, at parity with what KiCad's API and CLI expose:
-
-- **Review** - an EDA-agnostic design review (annotation, connectivity, shorts, decoupling, net classes) that runs the same engine on the PCB and, via the netlist, on the schematic; plus a one-call `kicad_full_review` that adds DRC, ERC, and schematic↔PCB comparison.
-- **Checks** - geometric DRC and schematic ERC via KiCad's own `kicad-cli`.
-- **Reads** - footprints, pads, tracks, vias, zones, shapes, text, stackup, layers, net classes, board outline, project info, netlist, and a consolidated BOM.
-- **Exports** - every `kicad-cli` format: Gerbers, drill, STEP/GLB/VRML/STL/3D-PDF, PDF/SVG/DXF, position files, IPC-2581, ODB++, IPC-D-356, plus schematic BOM/netlist/PDF/SVG.
-- **Authoring** - place/move/rotate/lock components, edit values, and create tracks, vias, zones, text, and graphics.
-- **Calculators** - the same trace-width, impedance, termination, length-match, and thermal-via sizing tools as the Altium backend (pure physics, EDA-independent).
-
-The neutral tools (`review_design`, `run_drc`, `run_erc`, `get_board_info`, `list_components`, `list_nets`) work on whichever backend is active.
-
-> If you'd rather not register the script globally, you can also open `Altium_API.PrjScr` via **File > Open...** and launch `StartMCPServer` from the **Run Script...** dialog the same way; the dialog picks up any loaded script project.
+The providers, their credentials and their access policies are in
+[`docs/PART_SOURCING.md`](docs/PART_SOURCING.md).
 
 ## Example use cases
 
@@ -612,7 +292,7 @@ In practice, while an MCP client is attached and sending keep-alive pings every 
 
 ### Tools vary in maturity
 
-Not every one of these tools has been exercised on every Altium version or design size. The [generic primitives](#generic-primitives-the-core) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
+Not every one of these tools has been exercised on every Altium version or design size. The generic primitives (`obj_query`, `obj_modify`, `obj_create`, `obj_delete`, `run_process`) and the core `application` / `project` tools are the best-tested. Some PCB modify operations (polygon repour, room creation, align-components) are less battle-tested. Queries are generally safer than mutations.
 
 ## Timeout and server lifecycle
 
@@ -644,269 +324,16 @@ The polling loop goes into idle mode after ~1 second of no MCP commands. In idle
 
 ## Tool reference
 
-The tools below, grouped into six categories. The **generic primitives** are the engine; the rest are convenience wrappers or category-specific operations.
+[`docs/TOOL_REFERENCE.md`](docs/TOOL_REFERENCE.md) lists every tool with
+its arguments, its **maturity** (offline / simulator / live-verified) and
+its **interaction** badge, flagging the ones that open a blocking dialog
+or leave work incomplete. It is generated by
+`python scripts/gen_tool_reference.py`, so it cannot drift from the code.
 
-> For a browsable index with per-tool **maturity** (offline / simulator / live-only) and **interaction** badges (which tools open a blocking dialog or leave work incomplete), see [`docs/TOOL_REFERENCE.md`](docs/TOOL_REFERENCE.md), auto-generated by `python scripts/gen_tool_reference.py`. At runtime, the `tool_catalog` tool serves the same data filtered.
-
-### Generic primitives (the core)
-
-These six tools cover most day-to-day work. They accept any object type supported by the bridge.
-
-| Tool | Purpose |
-|---|---|
-| `obj_query` | Read properties from schematic or PCB objects, with filter and scope |
-| `obj_modify` | Set properties on matching objects |
-| `obj_create` | Create and place a new object |
-| `obj_delete` | Delete matching objects |
-| `obj_batch_modify` | Apply many modify operations in one IPC round trip |
-| `obj_run_process` | Execute any Altium process command with keyed parameters |
-
-**Supported schematic object types:** `eNetLabel`, `ePort`, `ePowerObject`, `eSchComponent`, `eWire`, `eBus`, `eBusEntry`, `eParameter`, `ePin`, `eLabel`, `eLine`, `eRectangle`, `eSheetSymbol`, `eSheetEntry`, `eNoERC`, `eJunction`, `eImage`.
-
-**Supported PCB object types:** `eTrackObject`, `eViaObject`, `ePadObject`, `eComponentObject`, `eArcObject`, `eFillObject`, `eTextObject`, `ePolyObject`, `eRuleObject`, plus selection and design-rule classes.
-
-**Scope values:** `active_doc`, `project`, `project:<path>`, `doc:<path>`.
-
-### Application (21 tools)
-
-| Tool | Purpose |
-|---|---|
-| `app_get_status` | Is Altium running? Version / PID / attached state |
-| `app_attach` | Verify connection to the running instance |
-| `app_detach` | Save all dirty docs, signal server shutdown, release scripting engine |
-| `app_save_all` | Flush every modified document to disk (explicit checkpoint for the deferred-save model) |
-| `app_ping` | Test the polling loop is responsive; reports script version + mismatch with bundled |
-| `app_list_documents` | List every open document with `loaded` flag (sch, pcb, lib, outjob…) |
-| `app_get_active_document` | Which document currently has focus |
-| `app_set_active_document` | Switch focus to an already-loaded document by path |
-| `app_create_document` | Create a blank PCB / SCH / library / OutJob document and attach to the focused project |
-| `app_get_version` | Build / product version string |
-| `app_get_preferences` | Snap grids, unit system, common prefs |
-| `app_run_menu` | Run a menu command by path (e.g., `Tools|Design Rule Check`) |
-| `app_get_clipboard` | Read text from Windows clipboard |
-| `app_diag_workspace` | Diagnostic: enumerate the IPC workspace directory and report pending request files. Useful when investigating IPC plumbing |
-| `app_set_intent` | Record the current conversation's intent so the web dashboard can display what the agent is working on |
-| `app_checkpoint` | Snapshot the focused project into a content-addressed store (deduplicated) so the session is revertible; take one before risky autonomous edits |
-| `app_list_checkpoints` | List saved checkpoints for the workspace, newest first |
-| `app_restore_checkpoint` | Restore the project's design files from a checkpoint (`prune_added` for a true revert) - the undo the live bridge otherwise lacks |
-| `tool_catalog` | Discovery meta-tool: filter the 350+ tool surface by `category` / `maturity` / `interaction` / name `query` without loading every schema. Flags `modal` (blocking-dialog) and `partial` (incomplete) tools so a client plans around them |
-| `tool_invoke` | Companion to `tool_catalog`: run any registered tool by name + arguments dict without loading its schema, so a context-limited client can expose only a core set plus this pair. Target-tool errors return as data |
-
-### Project (53 tools)
-
-Lifecycle, parameters, compilation, analysis, outputs, ECO sync, variants.
-
-| Tool | Purpose |
-|---|---|
-| `proj_create` / `proj_open` / `proj_save` / `proj_close` | Project lifecycle |
-| `app_save_all` / `proj_get_focused` / `proj_list_open` / `proj_get_path` | Project state |
-| `proj_list_documents` / `proj_add_document` / `proj_remove_document` / `proj_import_document` | Document management |
-| `proj_load_sheets` | Force every SCH sheet of the focused project into the editor so `scope=project` queries hit them |
-| `proj_get_parameters` / `proj_set_parameter` / `proj_set_document_parameter` | Parameters |
-| `proj_push_parameters` | Copy all project parameters onto each loaded sheet (title-block fields) |
-| `proj_get_options` | Compiler / variant / channel settings |
-| `proj_compile` / `proj_get_messages` | Compile and read violations |
-| `proj_get_stats` / `proj_get_differences` / `proj_get_board_info` | Design analysis |
-| `proj_get_bom` / `proj_get_nets` / `proj_get_component_info` / `proj_get_component_info_many` / `proj_get_connectivity` / `proj_find_component` | Design queries (`proj_get_component_info_many` is the bulk variant) |
-| `proj_cross_probe` / `proj_lock_designator` / `proj_annotate` | Designator management |
-| `proj_compare_sch_pcb` / `proj_sync_pcb` / `proj_sync_schematic` | ECO sync (see [ECO limitation](#eco-sch--pcb-update-is-not-reliably-scriptable)) |
-| `proj_get_connectivity_many` | Pin-net connectivity for many designators in one round-trip (bulk) |
-| `proj_force_recompile` / `proj_get_compile_freshness` | Explicit SmartCompile cache control: save all dirty docs, invalidate, recompile; report cache age + dirty-in-editor docs |
-| `proj_list_variants` / `proj_get_active_variant` / `proj_set_active_variant` / `proj_create_variant` | Variant management |
-| `proj_export_variant_matrix_csv` / `proj_print_all_variants` | Variant outputs: the fitted/not-fitted matrix CSV (merges with a BOM), and one PDF per variant |
-| `proj_export_pdf` / `proj_export_step` / `proj_export_dxf` / `proj_export_image` / `proj_run_output` | Output generation |
-| `proj_list_outjob_containers` / `proj_run_outjob` / `proj_run_outjob_all` | OutJob execution (`proj_run_outjob_all` fires every container in one pass) |
-| `proj_generate_fab_package` | Run every OutJob container (Gerber / NC drill / IPC-356 / P&P / assembly / BOM) and return a consolidated manifest of produced files; optional STEP / DXF |
-
-### Library (67 tools)
-
-Symbol and footprint creation, linking, batch editing, comparison.
-
-| Tool | Purpose |
-|---|---|
-| `lib_create_symbol` / `lib_copy_component` / `lib_set_component_description` / `lib_set_current_component` | Symbol lifecycle. `lib_set_current_component` switches the SchLib editor's active component so subsequent generic-primitive calls (`obj_modify` on pins / rect / parameters) target the named symbol rather than whatever was last UI-selected |
-| `lib_add_pins` / `lib_get_pin_list` | Pins (places the whole pinout in one call) |
-| `lib_add_symbol_text` | Free text on a symbol body (Altium's `ISch_Label`): polarity marks, pin-group headings, NC annotations. Batched like `lib_add_pins`. `font_size` is Altium's own unit, NOT mils, and is deliberately not converted from one |
-| `lib_add_symbol_rectangle` / `lib_add_symbol_lines` / `lib_add_symbol_arc` / `lib_add_symbol_polygon` | Symbol graphics. `lib_add_symbol_rectangle` takes `fill_color` / `border_color`; a real colour also makes the rectangle solid, which is what discipline rule 17 asks for on an IC body (`-1` means no fill). Coordinates auto-snap to the 100-mil grid. `lib_add_symbol_lines` does N lines in one IPC round-trip for diode glyphs / op-amp triangles / connector outlines |
-| `lib_create_footprint` | Footprint creation |
-| `lib_add_footprint_pad` / `lib_add_footprint_track` / `lib_add_footprint_arc` | Footprint primitives |
-| `lib_link_footprint` / `lib_link_3d_model` | Link footprint / 3D model to symbol |
-| `lib_get_components` / `lib_get_component_details` / `lib_search` | Browse and search. `lib_get_components` returns a stable `index` per component |
-| `lib_rename_component` / `lib_delete_component` | Rename or delete one symbol. Both accept `component_index` (the `index` from `lib_get_components`) as well as `component_name`, so a part whose LibReference holds bytes a caller cannot reproduce (an embedded quote or a control char from a broken import) is still reachable |
-| `lib_batch_set_params` / `lib_batch_rename` | Bulk parameter / rename operations |
-| `lib_diff_libraries` | Compare two libraries |
-| `lib_easyeda_import` | Convert an LCSC / EasyEDA part into a real library part. Independent implementation from EasyEDA's published format spec, so no third-party converter is involved: symbol, footprint, pads, drills, silkscreen, 3D model and metadata all convert. `target=altium` returns an ordered plan of this server's own library tools (Altium's binary formats are never synthesized, the authoring API is used instead); `target=kicad` writes `.kicad_sym` / `.kicad_mod` plus a `.wrl` 3D model converted from EasyEDA's OBJ payload; `target=inspect` parses only. Works offline from a saved payload. Geometry with no faithful equivalent is reported in `warnings` rather than quietly approximated: polygon pads, filled regions in Altium, the HEIGHT of symbol body text (the text itself is placed as an `ISch_Label`; Altium's font size is not in mils and the conversion is undocumented, so the source range is reported instead of guessed), and the two that look correct after conversion, a slotted drill emitted round and an unplated hole emitted plated. The result should be checked with `lib_audit_footprint_vs_datasheet` |
-| `lib_easyeda_search` | EXPECT IT TO FAIL. EasyEDA withdrew its public part-search endpoint and LCSC's own search API answers with an error body, so there is nothing left to query and no login would restore it (the route returns an HTML error page, not an auth challenge). Get the LCSC part number from a browser and pass it to `lib_easyeda_import` instead, which is unaffected |
-| `lib_kicad_import` | The other direction from `lib_export_kicad_symbol`: read `.kicad_sym` / `.kicad_mod` and produce an Altium part. Needed because two of the three part providers publish only KiCad format, so without it every one of those hits is a dead end on Altium. `target=altium` returns an ordered plan of this server's own library tools; `target=inspect` parses only. Shares the neutral geometry model and the Altium emitter with `lib_easyeda_import`, so the two cannot drift. The s-expression reader is written here rather than depended on, so its escaping rules are verified not trusted. Conversions handled: derived symbols (`extends`, which is over half of KiCad's standard library and would otherwise convert to a part with no pins), multi-part components (a quad gate or dual op-amp becomes one Altium symbol with `part_count` and per-pin `owner_part_id` in a single call, never a flat merge), hidden pins (kept, and kept hidden), DeMorgan body styles (one taken, so pins are not duplicated), mm to mils, `.kicad_sym` Y-up vs `.kicad_mod` Y-down, KiCad pin angles (which pass through, unlike EasyEDA's 180-degree offset), arcs recovered from KiCad's start/mid/end form, active-low and clock pin markers (`Symbol_OuterEdge` / `Symbol_InnerEdge`, 1872 of them across 57 of KiCad's shipped libraries), pin name/number visibility (declared once per symbol in KiCad and per pin in Altium, which is how every passive is drawn), symbol body text, real text height and stroke instead of a constant, mirrored bottom-side text (unmirrored bottom silkscreen reads backwards on the board and this server's own `audit_find_mirrored_pcb_text` flags it), and the closing edge of a filled outline (`fp_poly` stores a closed area without repeating the final vertex, so walking consecutive pairs alone leaves a notch in 6028 polygons across 3626 of the shipped footprints). Adds a `lib_link_3d_model` step when `model_3d_path` names a STEP file that exists (KiCad ships STEP, which is what Altium's linker wants). Custom and trapezoid pads are emitted as their bounding rectangle, and that plus slotted drills emitted round and unplated holes emitted plated is reported in `warnings` |
-| `lib_clear_source_library` | Unpin every symbol (or a named subset) from its source-library provenance: clears SourceLibraryName, resets TargetFileName, syncs DesignItemId to the LibReference. The library-side sibling of `sch_clear_source_library`; the minimal fast path of `lib_normalize_implementations` when only provenance needs cleaning |
-| `lib_get_pad_geometry` / `lib_audit_footprint_vs_datasheet` | Audit one footprint against the manufacturer's recommended land pattern. The agent transcribes the datasheet drawing into a spec (pad grid, dimensions, numbering, thermal pad, paste policy - citation required); the tool reads the real pad geometry in mm precision and reports every discrepancy with expected-vs-actual: count, per-pad position/size/shape/drill, numbering sequence, thermal paste. Alignment to the library's origin and rotation convention is automatic; a mirrored pattern is deliberately reported, never compensated |
-| `lib_audit_footprint_policies` | Sweep a whole PcbLib and flag footprints that break the library's *own* conventions - pad rules (numbering scheme, drill/layer integrity), pin-1 markings, layer usage, courtyard, silkscreen, 3D models, designator presence/layer/height/centring. Infers each convention by majority across the library; every finding carries expected-vs-actual to drive a fix. Pass `policy` to enforce an explicit standard |
-| `lib_convert_designators_to_stroke` | Convert every TrueType `.Designator` in a PcbLib to a stroke font (clears bold/italic/UseTTFonts). TrueType PCB text won't persist a position change - it reverts on reload - so bold/italic designators can't be centred until converted. Reads back to confirm, saves, reloads |
-| `lib_reload_library` | Close and reopen a PcbLib so Altium rebuilds its caches from disk. `IPCB_Text.BoundingRectangle` is populated at load and is never refreshed when a text moves or resizes, so any read after a write returns the old box. Save first |
-| `lib_probe_designator` | Diagnostic, read-only: dump one footprint's origin, bounding rectangle, pad extents, and its `.Designator` anchor / bounding rectangle / size, in native TCoord. Use it to establish what `IPCB_Text.BoundingRectangle` measures before trusting it |
-| `lib_fix_designators` | Bring every `.Designator` onto the library's own convention - layer, height, and centring on the average pad centre (not the arbitrary library origin). Targets are inferred, never hard-coded; `policy` overrides them. Defaults to a dry run that reports the exact footprints, layers and coordinates it would change; `dry_run=False` applies and saves |
-| `lib_update_footprint_heights_from_3d` | Propagate `IPCB_ComponentBody.OverallHeight` up to `Footprint.Height` so placement-collision DRC actually fires (libraries from vendors often ship Height=0) |
-| `lib_inspect_cse_zip` / `lib_extract_cse_zip` | SamacSys / Component Search Engine zip import: identify the .SchLib / .PcbLib / STEP members (and any path-traversal members - those reject the whole archive), then stage the files and return an ordered install plan of `lib_install_library` / `lib_link_footprint` / `lib_link_3d_model` calls. Extraction is pure Python |
-| `lib_set_mech_layers` | Name, enable and kind the mechanical layers of one library, taken by PATH and refused unless the document that ended up focused is the one asked for. Reaches layers above 16 through `LayerUtils.MechanicalLayer`. A PAIRED kind (anything ending Top or Bottom) is held by the layer PAIR rather than by either layer, so both sides must be given in the same call; `tidy_pairs` removes pairs no kind justifies |
-| `lib_run_across` | Run one library command against many libraries in a single request, looping inside Altium. Failure is per library, so one library that will not open does not abandon the rest |
-
-### Schematic and general (94 tools)
-
-Schematic-side operations plus viewport and sheet management.
-
-| Tool | Purpose |
-|---|---|
-| `obj_query` / `obj_modify` / `obj_create` / `obj_delete` / `obj_batch_modify` | Generic primitives (see above) |
-| `obj_select` / `obj_deselect_all` | Selection state |
-| `obj_zoom` / `obj_switch_view` / `obj_refresh_document` | Viewport |
-| `obj_highlight_net` / `obj_clear_highlights` | Net highlighting |
-| `proj_run_erc` / `proj_get_unconnected_pins` | Electrical rules check |
-| `proj_add_sheet` / `proj_delete_sheet` / `sch_get_sheet_parameters` / `obj_get_document_info` | Sheet management |
-| `sch_place_wires` / `sch_place_bus` / `sch_place_net_label` / `sch_place_port` / `sch_place_power_port` | Schematic placement |
-| `sch_place_sheet_symbol` / `sch_place_sheet_entry` / `sch_place_bus_entry` | Hierarchical sheet primitives |
-| `sch_place_components` | Instantiate one or more components from an SchLib at (x,y) with rotation and designator override |
-| `sch_set_sheet_size` | Change SheetStyle (A / A0-A4 / Letter / Legal / Custom) |
-| `sch_place_no_erc` / `sch_place_junction` / `sch_place_image` / `sch_place_note` / `sch_add_directive` | Markers, annotations, directives |
-| `sch_place_rectangle` / `sch_place_line` | Graphical primitives |
-| `obj_copy` / `obj_count` / `proj_replace_component` | Bulk operations. `proj_replace_component` also syncs the component's Design Item ID so a re-linked part re-matches against the new library instead of showing Not Found |
-| `sch_clear_source_library` | Unpin placed components from a stale source library: clears SourceLibraryName and syncs DesignItemId to LibReference so Altium re-matches from Available Libraries. Schematic mirror of `pcb_clear_source_footprint_library`; per sheet, with optional designator filter |
-| `obj_set_grid` / `sch_set_units` | Change snap / visible grid / UnitSystem (mm ↔ mil) |
-| `obj_get_font_spec` / `obj_get_font_id` | Font table lookup |
-| `obj_batch_create` / `obj_batch_delete` | Generic bulk create / delete meta-tools |
-| `sch_place_wires` | Place many wire segments in one IPC round-trip |
-| `sch_place_components` | Bulk BOM placement: library_path + lib_ref + x/y/rotation per entry |
-| `sch_add_directive` / `sch_get_directives` | Parameter-set directives (diff pair tags, net class, custom rules) |
-| `sch_place_harness_connector` / `sch_place_cross_sheet_connector` | Harness bundles + hierarchical off-sheet ports |
-| `sch_place_text_frame` / `sch_increment_designators` / `sch_toggle_pin_visibility` | Multi-line note frames, bulk designator renumber, pin-label visibility |
-| `sch_place_probe` | SPICE / simulation measurement node |
-| `sch_set_component_part_id` | Switch active sub-part on a multi-gate symbol (U1A ↔ U1B) |
-| `sch_add_datafile_link` | Attach IBIS / SPICE model / CSV to a component's implementation |
-| `sch_get_constraint_groups` | Enumerate `DM_ConstraintGroups` (FPGA-style pin/timing constraints) |
-| `sim_get_readiness` / `sim_attach_primitives` / `sim_attach_model` / `sim_run` | SPICE workflow: audit, attach, simulate |
-| `design_review_snapshot` / `design_datasheet_checklist` | One-call full-project review + datasheet discipline |
-| `design_lint_report` | One-call run of all `audit_*` checks (component params, port direction, designator collisions, off-grid, tented vias, near-miss tracks, via antennas, removed pad shapes, off-board components, edge clearance, single-pin nets, MPN inconsistencies, ...) returned as a grouped violation list |
-| `audit_*` (31 tools) | Individual design-lint checks; each returns `{checked, violations, items[]}`. Wired into `design_lint_report` and the dashboard's Status → Health → Design lint panel via `/api/lint` |
-| `obj_crossref_net` | Sch pin list vs PCB pad list for a named net: diff + `in_sync` flag |
-| `obj_run_process` | Run any Altium process command |
-
-### PCB (108 tools)
-
-Queries and modifications on the active PCB document.
-
-| Tool | Purpose |
-|---|---|
-| `pcb_get_nets` / `pcb_get_net_classes` / `pcb_create_net_class` | Net / net class management |
-| `pcb_focus_board` | Make a specific .PcbDoc the focused board so all the GetPCBBoardAnywhere-based tools target it (needed when several PcbDocs are open; `app_set_active_document` doesn't reliably set the current PCB) |
-| `pcb_delete_net` | Remove nets - by default only empty ones (cleanup for stray nets left after deleting components); `force` to delete connected nets too |
-| `pcb_get_design_rules` / `pcb_create_design_rule` / `pcb_delete_design_rule` / `pcb_get_diff_pair_rules` / `pcb_get_room_rules` | Design rules. `pcb_create_design_rule` dispatches to typed `IPCB_*Constraint` subtypes for clearance / width / via-size with the proper per-layer setters |
-| `pcb_get_rule_properties` / `pcb_set_rule_properties` | Read rule metadata + the `descriptor` string (which carries every constraint value in human-readable form, e.g. `Width Constraint (Min=0.102mm) (Max=5.08mm) (Preferred=0.127mm)`); set metadata-only (Enabled / Priority / Scope1 / Scope2 / Comment). Constraint values must be set via `pcb_create_design_rule` or the Altium UI; they live on per-kind subtypes that DelphiScript cannot dispatch to safely from a base `IPCB_Rule` reference |
-| `pcb_set_rules_enabled` | Bulk DRC-rule enable/disable by name pattern |
-| `pcb_run_drc` / `pcb_get_clearance_violations` | Run DRC and read back enriched violations (each with x/y/layer + primitive1/2 net + type). `pcb_get_clearance_violations(net="X")` filters to one net |
-| `pcb_get_differential_pairs` | Enumerate every `IPCB_DifferentialPair` with both half-lengths + skew_mils. Catch length-mismatch high-speed bugs (USB / HDMI / PCIe transceiver skew limits) pre-fab |
-| `pcb_get_components` / `pcb_move_components` / `pcb_flip_component` / `pcb_align_components` / `pcb_snap_to_grid` | Component placement (`pcb_move_components` moves N components in one round-trip; pass a single-element list to move one) |
-| `pcb_get_component_pads` / `pcb_get_pad_properties` | Pad inspection |
-| `pcb_place_tracks` / `pcb_set_track_width` / `pcb_get_trace_lengths` | Track operations (`pcb_place_tracks` routes a whole net in one round-trip; pass a single-element list for one segment) |
-| `pcb_place_via` / `pcb_place_via_array` / `pcb_get_vias` | Via operations and stitching arrays |
-| `pcb_set_via_soldermask_relief` | Open soldermask over via barrels (barrel relief) |
-| `pcb_place_arc` / `pcb_place_text` / `pcb_place_fill` / `pcb_place_pad` | Primitive placement |
-| `pcb_place_components` | Place one or more footprints from a PcbLib directly onto the board - scriptable substitute for ECO/Update-PCB. Synced mode (`unique_id` + `pad_nets`) stamps the sch↔pcb link and creates/assigns nets (real connectivity, no dialog); `board_path` targets a specific board when several are open. Places N in one transaction; pass a single-element list for one |
-| `pcb_create_nets_from_list` / `pcb_bind_pad_nets` | Netlist-driven SCH→PCB bridge legs: create every missing net object in one round-trip, then assign component pads to nets from (designator, pin, net) rows - the connectivity half of an ECO without the modal dialog |
-| `pcb_build_from_project` | SCH→PCB bridge orchestrator: derives nets + pad bindings from the compiled netlist (or a `proj_export_netlist` tabular CSV) and runs both legs. Sequence: `pcb_place_components` → this → `proj_compare_sch_pcb` |
-| `pcb_place_dimension` / `pcb_place_angular_dimension` / `pcb_place_radial_dimension` | Dimension annotations |
-| `pcb_start_polygon_placement` / `pcb_place_polygon_rect` / `pcb_place_region` / `pcb_get_polygons` / `pcb_modify_polygon` / `pcb_repour_polygons` | Polygons and regions |
-| `pcb_calc_polygon_area` | Per-polygon copper area in square mm / mil |
-| `pcb_place_embedded_board` | Panelization: drop an `IPCB_EmbeddedBoard` grid referencing a child `.PcbDoc` |
-| `pcb_create_diff_pair` / `pcb_distribute_components` / `pcb_set_board_shape` | Higher-level ops |
-| `pcb_plan_placement` | Connectivity-driven auto-placement: force-directed global placement + legalization minimizes HPWL while keeping parts on-board and overlap-free, and optimizes part orientation (0/90/180/270) from real pin geometry. Pure-Python solver; dry-run by default, applies via `pcb_move_components` |
-| `pcb_create_room` | Room placement |
-| `pcb_get_unrouted_nets` | Ratsnest / unrouted analysis |
-| `pcb_get_layer_stackup` / `pcb_add_layer` / `pcb_remove_layer` / `pcb_modify_layer` / `pcb_set_layer_visibility` | Layer stack: get, add/remove layers, copper thickness + dielectric properties |
-| `pcb_set_mech_layer_kind` / `pcb_get_layer_display` / `pcb_set_layer_color` | What a mechanical layer is FOR, and how it is drawn. The KIND is what courtyard checking, assembly drawings, 3D body placement and the IPC-4761 via treatments resolve a layer by, so a layer named "Courtyard Top" with no kind is skipped by all of them. A paired kind needs `partner_layer`, because it is stored on the pair. Colour is a display setting and follows the installation rather than travelling with the file |
-| `pcb_export_stackup_csv` | Write the layer stack to the conventional fab CSV report (copper/dielectric interleaved, mil + mm, Er) |
-| `pcb_get_mech_layer_names` | Enabled mechanical layers with their custom names |
-| `pcb_get_board_outline` / `pcb_get_board_statistics` / `pcb_get_fab_stats` | Board-level queries. `pcb_get_fab_stats` returns the DFM summary fab houses ask for (min annular ring, min track width, via type counts, distinct hole count) |
-| `pcb_get_selected_objects` | Current selection |
-| `pcb_export_coordinates` | Pick-and-place export |
-| `pcb_delete_object` | Delete a specific object |
-| `pcb_lock_net_routing` | Lock/unlock tracks + arcs + vias by net, optional component lock |
-| `pcb_copy_component_placement` | Mapping-based clone of layout from src → dst designators |
-| `pcb_replicate_layout` | Multi-channel layout reuse: copy a source channel's routing (tracks/arcs/vias/polys) onto a matching channel with a rigid transform and net remap |
-| `pcb_filter_variant_components` | Select a variant's not-fitted / fitted / alternate components on the board (variant review, component-class building) |
-| `pcb_renumber_pads` | Renumber the current footprint's pads in spatial order (lr_tb / tb_lr), with start/increment/prefix |
-| `pcb_copy_tracks_radial` | Array selected tracks/arcs/vias radially about a center (circular copy via the verified rotate transform) |
-| `pcb_scale` | Scale selected free copper/artwork by a ratio about an anchor (selection/board center or origin) |
-| `pcb_set_text_visibility` | Bulk `NameOn`/`CommentOn` toggle, optional designator filter |
-| `pcb_clear_source_footprint_library` | Clear `SourceFootprintLibrary` so components re-match by lib-ref name from current Available Libraries (library-consolidation housekeeping) |
-| `pcb_place_stitching_vias` | Fill a rectangle with via stitching on a target net (collision-checked, defaults to dry_run) |
-| `pcb_make_paste_grid` | Split a thermal pad's paste opening into a grid (QFN swimming fix) |
-| `pcb_apply_dnp_paste_exclusion` | Suppress stencil paste on Not-Fitted components, the remediation half of `audit_variant_not_fitted`. Takes that tool's list by default so there is one definition of Not Fitted. Collapses the aperture per surface pad; through-hole pads have none and are counted separately. Reversible with `restore=True`, which requires the designators the apply reported, or `use_current_variant=True` to re-resolve them deliberately, since a variant change between the two calls would otherwise leave a fitted part with no aperture and say nothing. `dry_run=True` names the targets without touching the board |
-| `pcb_add_testpoints_for_net_class` | Auto-place SMD or through-hole testpoints above the board for every net in a netclass without existing coverage |
-| `pcb_calc_track_current_capacity` | IPC-2221 current capacity at multiple ΔT (pure Python, no Altium hit) |
-| `pcb_calc_trace_width_for_current` | Inverse IPC-2221: minimum + recommended track width to carry a target current at a given ΔT, copper weight and layer (the design-time complement of the capacity calc). Pure Python; optional resistance / voltage drop for a length |
-| `pcb_calc_impedance` | IPC-2141 microstrip / stripline + Wadell differential variants - pick the right track width for USB/HDMI/PCIe target impedance |
-| `pcb_calc_trace_width_for_impedance` | Inverse of the impedance calc: given a target Z₀ (or differential Zdiff) and the stackup, returns the trace width directly instead of iterating the forward formula. Round-trips with `pcb_calc_impedance`; pure Python |
-| `pcb_calc_termination` | Decide whether a net is electrically long for its edge rate (Johnson & Graham critical-length rule) and, if so, size the terminator - series / parallel / Thevenin split / AC - with nearest-E24 values. Composes with `pcb_calc_impedance` for Z₀; pure Python |
-| `pcb_calc_length_match` | Turn a skew budget (ps, or a fraction of the edge rate) into the length-match window a bus / diff pair must hold, and - given routed lengths - the serpentine compensation each net needs. Design-time complement of `pcb_tune_length` / `pcb_get_trace_lengths`; pure Python |
-| `pcb_calc_thermal_vias` | Size a thermal-via field under a power pad (Fourier conduction `R = L/kA`, vias in parallel): how many vias hit a target K/W or hold a dissipation within a temperature rise. Composes with `required_theta_ja`; pure Python |
-| `pcb_import_placement` | Position components from a coordinate list (designator / x / y / rotation / side) - the inverse of `pcb_export_coordinates` |
-| `pcb_autoplace_silkscreen` | Reposition component designators to clear pads and other silk (first-fit auto-position sweep); pair with the silk audits and `design_visual_review` |
-| `pcb_panelize` | Build a production panel on a blank board: embedded-board array of a source `.PcbDoc` + rectangular outline + corner tooling holes + fiducials |
-| `pcb_add_teardrops` / `pcb_remove_teardrops` | Launch Altium's board-wide Teardrop command (modal, non-suppressible dialog; choose Add/Remove and confirm in Altium) |
-| `pcb_tune_length` | Add approximate routed length to a net with a square serpentine; reports routed length before/after. Open-loop, not DRC-checked (no scriptable interactive tuner exists) |
-
-### Design agent (38 tools)
-
-A high-level surface for autonomous schematic creation. The MCP client's LLM is the planner; these tools provide the discipline, the inventory, the placer, and the executor.
-
-| Tool | Purpose |
-|---|---|
-| `design_get_discipline` | Returns the design discipline doc (datasheet-first part choice, NDA isolation, user-libraries-are-read-only, top-leftmost pin at (0,0) symbol-authoring convention, 100-mil grid, hide non-essential parameters, functional pin layout, ...) plus the `DesignPlan` JSON schema the executor enforces. Always call this first when starting a design task |
-| `design_session_start` | Open a durable, append-only session journal for an autonomous spec-to-board run. State survives context compaction, client restarts, and model switches, so any later client resumes from recorded fact instead of chat history |
-| `design_session_log` | Append one event to the session journal: `stage_enter` / `stage_result` (ok/blocked/failed) / `plan_revision` / `artifact` / `blocked` (a question for the human) / `resolved` / `note`. Returns the updated derived state |
-| `design_session_status` | Read a session's derived state: per-stage status map across the 13-stage pipeline, current/next stage, plan revision, open question, artifacts |
-| `design_session_resume` | Session state plus a plain-language next-action hint - surfaces any open blocking question first, otherwise names the next pipeline stage. Call at the start of a fresh client session to pick up where the last stopped |
-| `design_next_action` | The autonomy state machine: reads the journal and returns the single next 13-stage pipeline step (`proceed`/`retry`/`blocked`/`complete`) with its goal, exact `suggested_tools`, and `exit_gate`. Loop "call this → do it → log the result" to drive a full spec-to-board run without memorizing the workflow; bounded retries escalate a repeatedly-failing stage to a human question |
-| `design_autonomy_guide` | The autonomous spec-to-board loop protocol in one call: the loop (start session → next_action → execute → log → repeat), all 13 stages with tools + exit gates, hard constraints, and resume behavior. Also exposed as the `autonomous_design` MCP prompt |
-| `design_review_file` | **Opt-in offline fallback (off by default).** Parses a `.SchDoc`/`.PrjPcb` on disk directly (no running Altium, no license) for the component-level subset only (missing MPN/datasheet, placeholders, designator collisions, unannotated designators, incomplete title block). Not the preferred path - prefer `design_lint_report`/`proj_run_erc` when Altium is available; it can't compile a netlist or run ERC. Enable with `EDA_AGENT_HEADLESS_REVIEW=1` |
-| `design_solve_netlist_file` | **Opt-in offline fallback (off by default).** Reconstructs a `.SchDoc`'s compiled netlist geometrically (pins, wires, power ports, junctions, by-name net labels) with no Altium, then runs connectivity ERC (`single_pin_net` floating pins, `net_short` rail shorts). Validated wire/port/junction/label envelope; prefer `proj_get_nets`/`proj_run_erc` live. Enable with `EDA_AGENT_HEADLESS_REVIEW=1` |
-| `design_bom_file` | **Opt-in offline fallback (off by default).** Consolidated BOM from a `.SchDoc`/`.PrjPcb` on disk (no Altium) - one line per distinct `(mpn, value, lib_reference)`, designators grouped + naturally sorted, quantity summed; a `.PrjPcb` aggregates all sheets. Prefer live `proj_get_bom` when available. Enable with `EDA_AGENT_HEADLESS_REVIEW=1` |
-| `design_job_start` | Start a long engine run as a background job (returns a job id immediately) for work that can exceed the MCP tool timeout. Currently supports the `route` kind (offline A* router on a supplied `geometry` dict) |
-| `design_job_status` | Status of one background job, or all jobs when called without an id |
-| `design_job_result` | Fetch a finished job's result payload (None until the job is done) |
-| `design_snapshot_inventory` | Open a list of `.SchLib` paths and report what components they contain (lib_ref, designator prefix, pin count, description, footprint). The planner uses this to bias its part choices toward existing-lib parts |
-| `design_validate_plan` | Schema + cross-check on a candidate `DesignPlan` JSON. No Altium round-trip; cheap pre-flight |
-| `design_list_circuit_blocks` | List every canonical circuit block with its parameter contract (summary, required params, optional params, nets it creates) so the planner calls `design_add_circuit_block` with the exact parameter names instead of guessing. Single source of truth from the block registry. Pure Python |
-| `design_edit_plan` | Edit an existing plan - the MODIFY complement to the add tools, for iterating after review. Ordered ops: `set_part` (change value/footprint/mpn/...), `delete_part` (removes the part AND scrubs it from every net, dropping emptied nets and flagging now-floating ones), `rename_net`, `merge_nets` (folds one net's pins into another, de-duped). Owns the error-prone net bookkeeping; validates once at the end. Pure Python |
-| `design_generate_bom` | Derive the bill of materials from a plan's parts - consolidates parts with an `mpn` by `(manufacturer, mpn)` and parts without one by `(lib_ref, value, footprint)`, so every 100 nF 0402 cap is one line. Deterministic (R2 before R10); `summary.lines_without_mpn` flags lines still needing a part number. Returns the plan with its `bom` field populated, ready for execute. Pure Python |
-| `design_compose_netlist` | Apply many authoring operations (`add_part` / `add_block` / `connect_bus`) to a plan in ONE call - the bulk form of the authoring primitives (same reason you batch Altium ops instead of looping). Threads the plan through the ordered list, each op seeing the previous result, then validates once. Build a whole board in a single call; a failing op's index is named. Pure Python |
-| `design_add_part` | Add one part (an MCU, connector, regulator) and wire its pins to named nets in one call from a `{pin: net}` map - the datasheet-pinout shape. Pins mapping to the same net (an IC's five VCC pins) merge onto one net automatically, so you never hand-maintain a net's pin list. The atomic primitive under `design_add_circuit_block` (peripherals) and `design_connect_bus` (buses): chain the three to author a whole netlist without writing raw net JSON. Pure Python |
-| `design_connect_bus` | Wire a parallel bus (data/address) across two+ existing parts in one call - joins the i-th pin of every endpoint into one net per bit, so bit alignment is structural instead of a hand-typed risk. Creates no parts. The nets share one part-set, so a ≥4-bit bus authored here is auto-drawn as a bus glyph by the schematic pipeline. Pure Python |
-| `design_add_circuit_block` | Fold a canonical circuit block (`decoupling`, `pullup`, `pulldown`, `series_resistor`, `voltage_divider`, `rc_lowpass`, `rc_highpass`, `led_indicator`, `crystal`, `pi_filter`, `mosfet_low_side`, `mosfet_high_side`) into a `DesignPlan` in one call - allocates unique refdes, wires every pin to the right net, tags power/ground + roles, and returns the augmented plan with an inline re-validation. Naming-agnostic: you supply the part identities (lib_ref/value/footprint), it owns only the wiring pattern. The `crystal` block emits a matched load-cap pair (recognised by the matched-value check); `pi_filter` emits a C-L-C the placement motif clusters. Chain calls to build a netlist from blocks instead of hand-listing pins. Pure Python |
-| `design_compute_component_value` | Compute a manufacturable component value snapped to an IEC 60063 E-series (E6/E12/E24/E48/E96): feedback / unloaded resistor dividers, LED series resistor, first-order RC cut-off, crystal load caps, I²C pull-up window, divider tolerance, op-amp gain resistors, buck inductor, or a bare nearest-preferred snap. Returns the achieved value plus the error versus ideal, so the planner sizes parts deterministically instead of doing the arithmetic by hand |
-| `design_describe_circuits` | Report the electrical behaviour of each recognised sub-circuit in a `DesignPlan` (divider ratios, RC cut-offs, feedback gains, crystal load) computed from the chosen component values. Catches the wrong-but-consistent value error a divider of two valid resistors that produces the wrong ratio that connectivity / equality checks miss. Pure Python, no Altium |
-| `design_review_plan` | One-call offline pre-flight that bundles every plan-level analysis: structural `stats` (part counts by kind, IC/passive split, power & ground rails, widest signal net), the `erc` report, recognised-`circuits` behaviour, the `placement_constraints` that would auto-derive for `pcb_plan_placement`, and `net_classes`. Lets the planner vet a design in a single step before emit. Pure Python |
-| `design_suggest_diff_pair_traces` | Detect every differential pair (nets with role `differential`) and size its controlled-impedance trace width to a target (90 Ω USB / 100 Ω HDMI/LVDS) for the supplied stackup via the IPC-2141 impedance inverse. The trace geometry for every pair in one call. Pure Python |
-| `design_layout_schematic` | Compute a full schematic layout for a `DesignPlan` as pure data, no Altium: per-symbol position + rotation, per-net representation (wire / net_label / power_port), wire routes, glyph placements, junctions, and an aesthetic score. Offline and deterministic, so the planner can evaluate or compare layouts (optionally with `placement_hints`) before `design_execute_plan` |
-| `design_suggest_partition` | Min-cut partition (Kernighan-Lin style) of the plan's parts into N balanced functional groups that minimise the nets crossing between groups. Power/ground rails are excluded so the split follows signal structure. Use it to decide how to break a dense design across schematic sheets or group a PCB into rooms |
-| `design_preview_plan` | Run the full pipeline (motif composer + priors + wiring + routing-shorts detector) WITHOUT touching Altium, returning the canvas snapshot + an SVG preview for the planner to inspect before emit |
-| `design_execute_plan` | Open or create the project, create SchDoc(s) for each plan sheet, place every existing-lib part using the motif composer + canonical priors, route wires between same-block pins, drop labels for cross-block nets, drop power ports for `is_power` / `is_ground` nets, stamp Manufacturer / MPN / Datasheet (hidden by default), save. Halts on any `needs_creation` part with a structured error so the planner can resolve before instantiating. Accepts `placement_hints` for agent-driven layout refinement |
-| `design_audit_schematic` | Returns structured `{overlaps, wire_crossings, stacked_ports}` for the active schematic. Lets the planner read geometric violations and compute corrective placement moves |
-| `design_learn_from_layout` | After the user drags components in Altium and saves, diffs pre-edit vs post-edit positions and appends per-refdes `(part_role, anchor_role, dx, dy, rot_delta)` rows to `~/.eda-agent/placement_edits.jsonl`. The offline `build_placement_priors.py` aggregator turns that log into the relative-anchor priors the placement pipeline consumes |
-| `design_validate` | ERC + `proj_get_unconnected_pins` + compile messages bundled into a structured `ValidationReport(passed, errors[], warnings[], notes[])` so the planner can read failures and revise the plan |
-| `design_validate_requirement` | Gate a structured `DesignRequirement` (function, IOs, supply rails, environment, constraints, quantities) before planning: unresolved open questions, no outputs, no power source, inverted ranges, comms IO without protocol, rails above every stated input. Unstated facts go into `open_questions` for the user - never guessed. Pure Python |
-| `design_load_fab_profile` | Validate a fab capability profile (all dimensions mils, copper oz/ft²; stackups checked for copper outer layers, no adjacent copper) and echo the normalized form for rule synthesis. Capability numbers are transcribed from the fab's published page (cited in `source`), never recalled from memory |
-| `design_synthesize_rules` | Turn a fab profile + the plan's net classes + board-level targets (per-class current, differential impedance) into concrete `pcb_create_design_rule` / `pcb_modify_layer` parameter dicts. Every value traces to a profile field or a verified calculator (IPC-2221 width inverse, IPC-2141 impedance inverse); rules with missing inputs are skipped with a note, never guessed. Pure Python |
-| `design_plan_hierarchy` | Propose a multi-sheet hierarchy for a dense plan: min-cut partition (zones atomic), child sheets named from dominant zone roles, inter-sheet ports derived from severed signal nets (rails stay continuous through power ports), and the top-sheet op list in exact `sch_place_sheet_symbol` / `sch_place_sheet_entry` / `sch_generate_toc` shapes. Deterministic, pure Python |
-| `design_apply_hierarchy` | Rewrite a plan onto the sheets a hierarchy proposes: a NEW plan with top + child sheets, every part and zone re-homed. Feed the result to `design_validate_plan` then `design_execute_plan`. Pure Python |
-
-### Routing (2 tools)
-
-Offline routing over the board geometry dict (the `Gen_GetPcbGeometry` shape the renderer also consumes). All coordinates are mils, integers on the wire; every tool accepts its data as arguments (set `fetch_geometry=True` to pull the live board instead). The loop: fetch geometry → `route_plan` (or the Freerouting DSN/SES round-trip) → apply the ops via `pcb_place_tracks` / `pcb_place_via` → `pcb_run_drc` → `route_plan_repairs` → apply → repeat until clean.
-
-| Tool | Purpose |
-|---|---|
-| `route_plan` | Multi-layer Manhattan A* router, pure Python. Class-priority net ordering (power/ground first), per-class track widths, steiner-lite multi-pin trees, optional `nets` filter (everything else stays a static obstacle). Emits `tracks` / `vias` in the exact `pcb_place_tracks` / `pcb_place_via` shapes plus a per-net status map, completion summary, and a geometric clearance `validation` post-check. Deterministic |
-| `route_plan_repairs` | DRC-feedback repair planner: classifies the `pcb_run_drc` payload into buckets (net/pad clearance, unrouted, antenna, width, other) and plans ordered actions - `rip_and_reroute` (worst clearance offender first), `nudge` (dx/dy mils away from the fixed primitive), `widen`/`narrow`, `escalate`. Stateless; re-run DRC and re-plan each round |
+At runtime `tool_catalog` serves the same data, filtered by category,
+maturity, interaction or substring, and `tool_invoke` calls anything it
+lists. That pair is the whole advertised surface under
+`EDA_AGENT_TOOLSET=minimal`.
 
 ## Architecture
 

@@ -107,8 +107,20 @@ def _all_candidates() -> set[str]:
 
 
 def test_the_scan_finds_enough_to_be_worth_running():
+    """A floor, not a target.
+
+    The threshold was 200 while the README carried a hand-written copy
+    of the tool reference, which was most of the tokens on its own. That
+    section was deleted rather than moved, because it duplicated a
+    GENERATED file and had already drifted from it, so the honest count
+    across the prose is now around 110.
+
+    Lowered to match, and no lower: the number still has to be large
+    enough that a scan returning a handful, or nothing, fails here
+    rather than passing as a clean result.
+    """
     found = _all_candidates()
-    assert len(found) > 200, (
+    assert len(found) > 80, (
         f"only {len(found)} tool-shaped tokens found across the prose; "
         f"the scan broke and this file is guarding a remnant")
 

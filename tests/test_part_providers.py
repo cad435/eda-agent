@@ -710,11 +710,14 @@ def test_the_readme_table_lists_every_provider_with_its_real_kind():
     whose `kind` disagrees with the class sends the reader looking for a
     symbol that a catalogue never had.
     """
-    import pathlib
     import re
 
-    readme = (pathlib.Path(__file__).resolve().parents[1]
-              / "README.md").read_text(encoding="utf-8")
+    from tests import documentation_set
+
+    # The provider table moved out of the README into PART_SOURCING when
+    # the README was split, so the whole prose set is read rather than
+    # one file.
+    readme = documentation_set.prose_text()
 
     # Only the provider table: rows whose second cell is the kind.
     documented = {
@@ -747,11 +750,11 @@ def test_the_readme_names_the_env_var_each_catalogue_actually_reads():
     the code is what gets read. Nothing else connects them, and a typo
     presents as "this provider never works" with no clue why.
     """
-    import pathlib
     import re
 
-    readme = (pathlib.Path(__file__).resolve().parents[1]
-              / "README.md").read_text(encoding="utf-8")
+    from tests import documentation_set
+
+    readme = documentation_set.prose_text()
 
     for provider in available_providers():
         for var in getattr(provider, "env_vars", ()):
