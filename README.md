@@ -132,6 +132,31 @@ this server, so nothing here can start it or make it connect.
 Full detail, including what differs between them and what each one
 cannot do, is in [`docs/BACKENDS.md`](docs/BACKENDS.md).
 
+## Finding the right tool
+
+Tools are grouped by the **document** they act on, and mixing them up is the
+most common mistake: `lib_` acts on a `.PcbLib` or `.SchLib`, `pcb_` on an open
+`.PcbDoc`, `sch_` and `obj_` on an open `.SchDoc`. A board tool aimed at a
+library does not reliably fail. With no board focused it can resolve some other
+open board and report success for work you never asked for.
+
+Two tools answer different questions about the surface:
+
+- `tool_catalog` - search by name, category, maturity or interaction. Use it
+  when you know roughly what the operation is called.
+- `tool_guide` - ask in plain words what you are trying to do. It answers the
+  tool and what it needs first, the tool you were probably reaching for and why
+  it acts on a different document, and the short list of things that are
+  genuinely impossible with the reason.
+
+That last answer is the one worth knowing about. Without it there is no way to
+tell "you missed it" from "it does not exist", so the same dead ends get
+investigated repeatedly. An empty result from `tool_guide` means the guide has
+nothing on the subject, not that the server cannot do it.
+
+The same split is stated in the server instructions your MCP client receives at
+startup, so a client that reads them starts out knowing it.
+
 ## Tool count (clients that cap it)
 
 Some MCP clients limit how many tools a server may expose, or serialize every
