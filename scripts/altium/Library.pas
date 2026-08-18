@@ -369,10 +369,21 @@ End;
 {                                                                             }
 { Bounded by PartCount: the command WRAPS past the last part, so a target     }
 { that can never be reached would spin forever rather than fail.              }
-Procedure StepLibComponentPartTo(SchLib : ISch_Lib; Component : ISch_Component; Target : Integer);
+{ Returns whether the editor is now showing Target.                           }
+{                                                                             }
+{ TRUE ALSO WHEN THE PART ID CANNOT BE READ, because a build that does not    }
+{ report one leaves nothing to check and refusing there would break every     }
+{ single-part symbol. FALSE only when the id WAS readable and the target was  }
+{ never reached, which is the case a caller must not act on: the editor is    }
+{ then showing some other part, and a query against it answers about the      }
+{ wrong one. That silent answer is the whole defect this replaces.            }
+Function StepLibComponentPartTo(SchLib : ISch_Lib; Component : ISch_Component;
+    Target : Integer) : Boolean;
 Var
     Count, Steps, Seen : Integer;
 Begin
+    Result := True;
+
     Count := 1;
     Try Count := Component.PartCount; Except End;
     If Count < 1 Then Count := 1;
@@ -389,8 +400,16 @@ Begin
         RunProcess('SCH:NextComponentPart');
         Steps := Steps + 1;
         Seen := CurrentLibPartId(SchLib);
-        If Seen < 0 Then Break;
+        { Readable a moment ago and not now: stop, and do not claim the  }
+        { editor is on the target when that can no longer be checked.    }
+        If Seen < 0 Then
+        Begin
+            Result := False;
+            Exit;
+        End;
     End;
+
+    Result := (Seen = Target);
 End;
 
 { SelectLibComponentPart - focus a library symbol and make PART PartId the    }
@@ -450,8 +469,19 @@ Begin
     { property. Step it and read the document's part id back after each step. }
     { Bounded by PartCount because the command WRAPS at the last part, so an  }
     { unreachable target would otherwise spin forever.                        }
+    { NIL RATHER THAN THE WRONG PART. Returning the component when the
+      editor never reached the requested part is exactly what GH #11
+      reported: a query scoped to part 3 answered about part 1 and
+      nothing said so. Nil makes the scope resolve to NOT_FOUND, which
+      is a caller can act on. }
     If Target > 0 Then
-        StepLibComponentPartTo(SchLib, Component, Target);
+    Begin
+        If Not StepLibComponentPartTo(SchLib, Component, Target) Then
+        Begin
+            Result := Nil;
+            Exit;
+        End;
+    End;
 
     Try SchLib.GraphicallyInvalidate; Except End;
     Result := Component;
@@ -8344,15 +8374,28 @@ Begin
     End;
 End;
 
-Function Lib_SetMechLayers(Params : String; RequestId : String) : String;
+{ Apply mechanical layer operations to a board's stack.                       }
+{                                                                              }
+{ SHARED BY THE LIBRARY AND THE BOARD. A PcbLib carries an IPCB_Board and so   }
+{ does a PcbDoc, and from here down nothing cares which it came from. Only     }
+{ the resolution differs: a library is taken by path and verified, a board is  }
+{ whichever one is open.                                                       }
+{                                                                              }
+{ Written as one function rather than two because the paired-kind handling is  }
+{ the awkward part: drain the existing pairs, add with the top layer first,    }
+{ write the kind to the pair index, release whatever else holds it, retry, and }
+{ put the released kinds back if it still will not take. A second copy of that }
+{ would drift from this one, and the drift would be silent.                    }
+{                                                                              }
+{ Where names the document in the messages, so a caller reading a refusal      }
+{ knows which file it is about.                                                }
+
+Function ApplyMechLayerOps(Board : IPCB_Board; OpsStr : String;
+    TidyPairs : Boolean; Where : String; RequestId : String) : String;
 Var
-    LibPath, FocusedPath, OpsStr, Op : String;
+    Op : String;
     LayerName, NewName, EnabledStr, KindStr : String;
     ItemsJson, Problems : String;
-    Workspace : IWorkspace;
-    Doc : IDocument;
-    PcbLib : IPCB_Library;
-    Board : IPCB_Board;
     LayerStack : IPCB_LayerStack_V7;
     LayerObj : IPCB_LayerObject_V7;
     MasterStack : IPCB_MasterLayerStack;
@@ -8364,7 +8407,7 @@ Var
     PairKind, Restored : Integer;
     PairKindSet, HavePair : Boolean;
     HandledPairs, PairTag, OpReleased, Remaining : String;
-    TidyPairs, Justified : Boolean;
+    Justified : Boolean;
     TidiedJson : String;
     ScanA, ScanB, KindA, KindB, Drained, PairsRemoved : Integer;
     TLayerA, TLayerB : TLayer;
@@ -8380,9 +8423,6 @@ Var
     WantEnabled, GotEnabled, First, DidSomething : Boolean;
     NameBack : String;
 Begin
-    LibPath := ExtractJsonValue(Params, 'library_path');
-    OpsStr := ExtractJsonValue(Params, 'layers');
-
     If Trim(OpsStr) = '' Then
     Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
@@ -8391,70 +8431,12 @@ Begin
         Exit;
     End;
 
-    Workspace := GetWorkspace;
-    If Workspace = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
-        Exit;
-    End;
-
-    FocusedPath := '';
-    Doc := Workspace.DM_FocusedDocument;
-    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
-    If LibPath = '' Then LibPath := FocusedPath;
-    If LibPath = '' Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
-            'No library is active and library_path was not supplied');
-        Exit;
-    End;
-
-    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
-    Begin
-        ResetParameters;
-        AddStringParameter('ObjectKind', 'Document');
-        AddStringParameter('FileName', LibPath);
-        RunProcess('WorkspaceManager:OpenObject');
-    End;
-
-    { The check the pcb_* layer tools do not make. Opening a document can    }
-    { report success without moving the focus, and every later read then     }
-    { describes the wrong library.                                           }
-    FocusedPath := '';
-    Doc := Workspace.DM_FocusedDocument;
-    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
-    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'WRONG_DOCUMENT_FOCUSED',
-            'Asked for ' + LibPath + ' but the focused document is "'
-            + FocusedPath + '". Nothing was changed: editing whichever '
-            + 'library happened to be in front would look like success.');
-        Exit;
-    End;
-
-    PcbLib := PCBServer.GetCurrentPCBLibrary;
-    If PcbLib = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
-            'Focused ' + LibPath + ' but it is not a PCB library');
-        Exit;
-    End;
-
-    Board := Nil;
-    Try Board := PcbLib.Board; Except Board := Nil; End;
-    If Board = Nil Then
-    Begin
-        Result := BuildErrorResponse(RequestId, 'NO_BOARD',
-            'The library has no board to carry a layer stack');
-        Exit;
-    End;
-
     LayerStack := Nil;
     Try LayerStack := Board.LayerStack_V7; Except End;
     If LayerStack = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_STACKUP',
-            'Could not access the layer stack of ' + LibPath);
+            'Could not access the layer stack of ' + Where);
         Exit;
     End;
 
@@ -8482,7 +8464,6 @@ Begin
     HandledPairs := '';
     { Off by default: a tidy REMOVES pairs, and a caller that only wanted }
     { to rename a layer should not have the stack rearranged underneath.  }
-    TidyPairs := (ExtractJsonValue(Params, 'tidy_pairs') = 'true');
     TidiedJson := '';
     PairsRemoved := 0;
     First := True;
@@ -8972,17 +8953,17 @@ Begin
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_OPERATIONS',
             'No layer operations were parsed from the layers parameter, so '
-            + 'nothing was changed in ' + LibPath + '. Expected '
+            + 'nothing was changed in ' + Where + '. Expected '
             + '"layer=<name>;name=<text>;enabled=<bool>;kind=<text>" with '
             + '"~~" between entries.');
         Exit;
     End;
 
     Try Board.ViewManager_FullUpdate; Except End;
-    SaveDocByPath(LibPath);
+    SaveDocByPath(Where);
 
     Result := BuildSuccessResponse(RequestId,
-        '{"library":"' + EscapeJsonString(LibPath) + '",'
+        '{"document":"' + EscapeJsonString(Where) + '",'
         + '"layers":[' + ItemsJson + '],'
         + '"changed":' + IntToStr(Changed) + ','
         + '"failed":' + IntToStr(FailedCount) + ','
@@ -8996,6 +8977,344 @@ Begin
         { it survives, and saying so is the difference between a bound  }
         { and a silent one.                                              }
         + '"pairs_scanned_to":' + IntToStr(MechScanLimit) + '}');
+End;
+
+{ The library half: take the library by PATH and refuse unless the document  }
+{ that ended up focused is the one asked for.                                }
+{                                                                             }
+{ Acting on the wrong library is worse than not acting, because it looks like }
+{ it worked. A sweep over twenty one libraries once returned twenty one       }
+{ identical answers, every call having re-read the same focused file.         }
+
+{ Delete primitives from ONE footprint in a PcbLib.                           }
+{                                                                              }
+{ THE LIBRARY HAD NO PRIMITIVE DELETE AT ALL. obj_delete and pcb_delete_object }
+{ both resolve a BOARD, and when none is focused the board lookup opens the    }
+{ first PcbDoc any open project holds. So a caller working in a footprint had  }
+{ no correct tool, and the incorrect one removed primitives from a board they  }
+{ had not named and did not report which.                                      }
+{                                                                              }
+{ Scoped three ways, all required to agree before anything is removed: the     }
+{ LIBRARY by path, the FOOTPRINT by name, and the object type. A layer filter  }
+{ narrows it further, which is the usual case: clear the silkscreen on one     }
+{ footprint without touching its pads.                                         }
+{                                                                              }
+{ Pads are excluded unless include_pads is set. Deleting a pad changes the     }
+{ part's connectivity rather than its drawing, and a caller clearing graphics  }
+{ off a layer should not lose the pinout to a filter that was wider than they  }
+{ realised.                                                                    }
+{                                                                              }
+{ Collect first, delete second. Removing objects while the group iterator is   }
+{ walking them is how a traversal skips half the list, and a half-cleared      }
+{ footprint looks like the filter was wrong.                                   }
+
+Function Lib_DeleteFootprintPrimitives(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, FpWanted, FpName, ObjTypeStr, LayerStr : String;
+    ConfirmStr, RemovedJson : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Iter : IPCB_LibraryIterator;
+    GrpIter : IPCB_GroupIterator;
+    Footprint, Target : IPCB_LibComponent;
+    Prim : IPCB_Primitive;
+    { Integer, not TObjectId. ObjectTypeFromStringPCB returns an Integer,
+      and declaring the target as an enum type this build may not define
+      the way the script expects is its own runtime fault. }
+    ObjFilter : Integer;
+    WantLayer, MatchLayer : TLayer;
+    IncludePads, Found : Boolean;
+    Removed, I, Examined : Integer;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    FpWanted := ExtractJsonValue(Params, 'footprint_name');
+    ObjTypeStr := ExtractJsonValue(Params, 'object_type');
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    ConfirmStr := ExtractJsonValue(Params, 'confirm');
+    IncludePads := (ExtractJsonValue(Params, 'include_pads') = 'true');
+
+    If FpWanted = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'footprint_name required. Deleting from whichever footprint the '
+            + 'editor happens to show is the mistake this tool exists to '
+            + 'avoid.');
+        Exit;
+    End;
+
+    If ConfirmStr <> 'true' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'CONFIRM_REQUIRED',
+            'This removes primitives from footprint "' + FpWanted
+            + '". Pass confirm=true once the object_type and layer are '
+            + 'what you mean. Read them first with lib_probe_footprint.');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_LIBRARY',
+            'No library is active and library_path was not supplied');
+        Exit;
+    End;
+
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+
+    { Verified AFTER the open, the same way lib_set_mech_layers does. A     }
+    { delete aimed at a library that never came to the front would land in  }
+    { whichever one did.                                                     }
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_DOCUMENT_FOCUSED',
+            'Asked for ' + LibPath + ' but the focused document is "'
+            + FocusedPath + '". Nothing was deleted.');
+        Exit;
+    End;
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'Focused ' + LibPath + ' but it is not a PCB library. To '
+            + 'delete primitives from a BOARD use pcb_delete_object. '
+            + 'This tool edits a footprint inside a .PcbLib.');
+        Exit;
+    End;
+
+    Target := Nil;
+    Iter := PcbLib.LibraryIterator_Create;
+    Try
+        Footprint := Iter.FirstPCBObject;
+        While Footprint <> Nil Do
+        Begin
+            FpName := '';
+            Try FpName := Footprint.Name; Except End;
+            If UpperCase(FpName) = UpperCase(FpWanted) Then
+            Begin
+                Target := Footprint;
+                Break;
+            End;
+            Footprint := Iter.NextPCBObject;
+        End;
+    Finally
+        PcbLib.LibraryIterator_Destroy(Iter);
+    End;
+
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_FOOTPRINT',
+            'Footprint not found in ' + LibPath + ': ' + FpWanted);
+        Exit;
+    End;
+
+    ObjFilter := ObjectTypeFromStringPCB(ObjTypeStr);
+    If (ObjTypeStr <> '') And (ObjFilter = -1) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'INVALID_TYPE',
+            'Unknown PCB object type: ' + ObjTypeStr);
+        Exit;
+    End;
+
+    WantLayer := eNoLayer;
+    If LayerStr <> '' Then
+    Begin
+        WantLayer := GetLayerFromString(LayerStr);
+        If WantLayer = eNoLayer Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'INVALID_LAYER',
+                'Unknown layer name: ' + LayerStr);
+            Exit;
+        End;
+    End;
+
+    If (ObjTypeStr = '') And (LayerStr = '') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'TOO_BROAD',
+            'Give object_type or layer. Emptying a whole footprint is not '
+            + 'something to reach by leaving both filters off.');
+        Exit;
+    End;
+
+    { ONE MATCH PER PASS, and never a primitive held outside its iterator.  }
+    {                                                                        }
+    { The first version collected the matches into a TInterfaceList and then }
+    { deleted them. That crashes the engine with an access violation:        }
+    { DelphiScript narrows an interface at ITERATOR RETURN, and a typed      }
+    { local assigned from an untyped list element keeps the base dispatch,   }
+    { so RemovePCBObject was handed something that was not usable as a       }
+    { primitive.                                                             }
+    {                                                                        }
+    { Removing during a walk is not the alternative: that makes the          }
+    { traversal skip entries and leaves a half-cleared footprint that reads  }
+    { as a filter which was too narrow. So each pass takes a fresh iterator, }
+    { stops at the FIRST match, closes the iterator, and removes it. A       }
+    { footprint holds tens of primitives, so the repeated walk costs         }
+    { nothing worth optimising.                                              }
+    Removed := 0;
+    Examined := 0;
+    RemovedJson := '';
+
+    PCBServer.PreProcess;
+    Try
+        PCBServer.SendMessageToRobots(Target.I_ObjectAddress,
+            c_Broadcast, PCBM_BeginModify, c_NoEventData);
+
+        { Bounded, so a RemovePCBObject that silently refuses cannot spin  }
+        { here forever re-finding the same primitive.                       }
+        For I := 1 To 5000 Do
+        Begin
+            MatchLayer := eNoLayer;
+            Found := False;
+            GrpIter := Target.GroupIterator_Create;
+            Try
+                Prim := GrpIter.FirstPCBObject;
+                While Prim <> Nil Do
+                Begin
+                    If I = 1 Then Examined := Examined + 1;
+                    If ((ObjFilter = -1) Or (Prim.ObjectId = ObjFilter))
+                       And ((WantLayer = eNoLayer) Or (Prim.Layer = WantLayer))
+                       And (IncludePads Or (Prim.ObjectId <> ePadObject)) Then
+                    Begin
+                        MatchLayer := Prim.Layer;
+                        Found := True;
+                        Break;
+                    End;
+                    Prim := GrpIter.NextPCBObject;
+                End;
+            Finally
+                Target.GroupIterator_Destroy(GrpIter);
+            End;
+
+            If Not Found Then Break;
+
+            { Prim still carries the narrowing it got from the iterator, }
+            { and the iterator is closed, so the walk cannot be           }
+            { disturbed by the removal.                                   }
+            Try
+                Target.RemovePCBObject(Prim);
+                Removed := Removed + 1;
+                If RemovedJson <> '' Then RemovedJson := RemovedJson + ',';
+                RemovedJson := RemovedJson + '"'
+                    + EscapeJsonString(GetLayerString(MatchLayer)) + '"';
+            Except
+                { It matched and would not go. Stop rather than loop on it. }
+                Break;
+            End;
+        End;
+
+        PCBServer.SendMessageToRobots(Target.I_ObjectAddress,
+            c_Broadcast, PCBM_EndModify, c_NoEventData);
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    If Removed > 0 Then
+    Begin
+        Try PcbLib.Board.ViewManager_FullUpdate; Except End;
+        SaveDocByPath(LibPath);
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"library":"' + EscapeJsonString(LibPath) + '",'
+        + '"footprint":"' + EscapeJsonString(FpWanted) + '",'
+        + '"removed":' + IntToStr(Removed) + ','
+        + '"examined":' + IntToStr(Examined) + ','
+        + '"layers":[' + RemovedJson + '],'
+        + '"pads_included":' + BoolToJsonStr(IncludePads) + '}');
+End;
+
+Function Lib_SetMechLayers(Params : String; RequestId : String) : String;
+Var
+    LibPath, FocusedPath, OpsStr : String;
+    Workspace : IWorkspace;
+    Doc : IDocument;
+    PcbLib : IPCB_Library;
+    Board : IPCB_Board;
+Begin
+    LibPath := ExtractJsonValue(Params, 'library_path');
+    OpsStr := ExtractJsonValue(Params, 'layers');
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If LibPath = '' Then LibPath := FocusedPath;
+    If LibPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'library_path required, and no document is focused');
+        Exit;
+    End;
+
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', LibPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    End;
+
+    FocusedPath := '';
+    Doc := Workspace.DM_FocusedDocument;
+    If Doc <> Nil Then Try FocusedPath := Doc.DM_FullPath; Except End;
+    If (FocusedPath = '') Or (UpperCase(FocusedPath) <> UpperCase(LibPath)) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_DOCUMENT_FOCUSED',
+            'Asked for ' + LibPath + ' but the focused document is "'
+            + FocusedPath + '". Nothing was changed: editing whichever '
+            + 'library happens to be in front is how a sweep silently '
+            + 'rewrites the same file twenty times.');
+        Exit;
+    End;
+
+    PcbLib := PCBServer.GetCurrentPCBLibrary;
+    If PcbLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'Focused ' + LibPath + ' but it is not a PCB library. For a '
+            + 'BOARD use pcb_set_mech_layers, which takes the open PcbDoc '
+            + 'and reaches the same names, enables and kinds.');
+        Exit;
+    End;
+
+    Board := Nil;
+    Try Board := PcbLib.Board; Except Board := Nil; End;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_BOARD',
+            'The library has no board to carry a layer stack');
+        Exit;
+    End;
+
+    Result := ApplyMechLayerOps(Board, OpsStr,
+        ExtractJsonValue(Params, 'tidy_pairs') = 'true', LibPath, RequestId);
 End;
 
 { Force a library_path onto a parameter object.                              }
@@ -9213,6 +9532,8 @@ Begin
         'delete_component':     Result := Lib_DeleteComponent(Params, RequestId);
         'rename_component':     Result := Lib_RenameComponent(Params, RequestId);
         'delete_footprint':     Result := Lib_DeleteFootprint(Params, RequestId);
+        'delete_footprint_primitives':
+                                Result := Lib_DeleteFootprintPrimitives(Params, RequestId);
         'remove_model':         Result := Lib_RemoveModel(Params, RequestId);
         'rename_footprint':     Result := Lib_RenameFootprint(Params, RequestId);
         'set_model_name':       Result := Lib_SetModelName(Params, RequestId);

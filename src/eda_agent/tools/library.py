@@ -3550,6 +3550,75 @@ def register_library_tools(mcp):
         )
 
     @mcp.tool()
+    async def lib_delete_footprint_primitives(
+        footprint_name: str,
+        object_type: str = "",
+        layer: str = "",
+        library_path: str = "",
+        include_pads: bool = False,
+        confirm: bool = False,
+    ) -> dict[str, Any]:
+        """Delete primitives inside ONE footprint of a PCB library.
+
+        THE ONLY LIBRARY-SCOPED PRIMITIVE DELETE. ``obj_delete`` and
+        ``pcb_delete_object`` both resolve a BOARD, and when no board is
+        focused that lookup opens the first PcbDoc any open project
+        holds. Aimed at a library they do not fail; they remove
+        primitives from a board you never named, and the reply does not
+        say which one. This is the tool for editing a footprint.
+
+        SCOPED THREE WAYS, all of which must agree before anything is
+        removed: the library by path, the footprint by name, and the
+        object type or layer. The library is verified AFTER it is
+        brought to the front, so a delete aimed at one that never
+        focused is refused rather than landing in whichever did.
+
+        PADS ARE EXCLUDED unless ``include_pads``. Deleting a pad changes
+        the part's connectivity rather than its drawing, and clearing
+        graphics off a layer should not quietly cost you the pinout.
+
+        Args:
+            footprint_name: The footprint to edit. Required: deleting
+                from whichever footprint the editor happens to show is
+                the mistake this avoids.
+            object_type: PCB object type, e.g. "track", "arc", "string",
+                "region", "fill". Give this or ``layer``.
+            layer: Restrict to one layer, e.g. "TopOverlay". The usual
+                case: clear a silkscreen without touching anything else.
+            library_path: The .PcbLib. Defaults to the focused document.
+            include_pads: Allow pads to be removed. Off by default.
+            confirm: Required. Read the footprint first with
+                ``lib_probe_footprint`` and pass True once the filters
+                are what you mean.
+
+        Returns:
+            Dict with ``library``, ``footprint``, ``removed``,
+            ``examined``, ``layers`` and ``pads_included``.
+        """
+        if not footprint_name.strip():
+            return {"ok": False, "reason": "footprint_name is required"}
+        if not object_type.strip() and not layer.strip():
+            return {"ok": False, "reason": (
+                "give object_type or layer. Emptying a whole footprint is "
+                "not something to reach by leaving both filters off")}
+
+        params: dict[str, Any] = {"footprint_name": footprint_name}
+        if object_type.strip():
+            params["object_type"] = object_type.strip()
+        if layer.strip():
+            params["layer"] = layer.strip()
+        if library_path.strip():
+            params["library_path"] = library_path.strip()
+        if include_pads:
+            params["include_pads"] = "true"
+        if confirm:
+            params["confirm"] = "true"
+
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.delete_footprint_primitives", params)
+
+    @mcp.tool()
     async def lib_delete_footprint(
         footprint_name: str,
         library_path: str = "",

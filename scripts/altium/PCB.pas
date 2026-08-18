@@ -5458,11 +5458,17 @@ Var
     FoundObj : IPCB_Primitive;
     Dist, BestDist : Double;
     BRect : TCoordRect;
+    Why : String;
 Begin
-    Board := GetPCBBoardAnywhere;
+    { This DELETES, so it may not wander to find a board. See
+      GetPCBBoardForMutation: the wandering lookup opens the first board
+      any open project holds and hides the focus change, which for a
+      delete means removing primitives from a board the caller never
+      named. }
+    Board := GetPCBBoardForMutation(Why);
     If Board = Nil Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
+        Result := BuildErrorResponse(RequestId, 'AMBIGUOUS_TARGET', Why);
         Exit;
     End;
 
@@ -9682,15 +9688,85 @@ End;
 { MechanicalLayerEnabled are undeclared in this script binding.               }
 {..............................................................................}
 
+{ Name, enable and kind the mechanical layers of the OPEN BOARD.              }
+{                                                                              }
+{ lib_set_mech_layers refuses a PcbDoc outright, because it resolves a library }
+{ by path and a board is not one. That left the board half-served: kinds were  }
+{ reachable one at a time through pcb_set_mech_layer_kind, and names and       }
+{ enables were not reachable at all above Mechanical16.                        }
+{                                                                              }
+{ The whole apparatus is shared with the library, so pairs, the retry once the }
+{ previous holder is released, the restore when it still will not take, and    }
+{ the tidy all behave identically here. Only the resolution differs: the       }
+{ library is taken by path and verified, the board is whichever one is open.   }
+
+Function PCB_SetMechLayers(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Where : String;
+Begin
+    Board := GetPCBBoardAnywhere;
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB',
+            'No PCB document is active. For a LIBRARY use '
+            + 'lib_set_mech_layers, which takes the library by path.');
+        Exit;
+    End;
+
+    Where := '';
+    Try Where := Board.FileName; Except Where := ''; End;
+    If Where = '' Then Where := 'the open board';
+
+    Result := ApplyMechLayerOps(Board, ExtractJsonValue(Params, 'layers'),
+        ExtractJsonValue(Params, 'tidy_pairs') = 'true', Where, RequestId);
+End;
+
+{ How many primitives sit on one layer of a board.                            }
+{                                                                              }
+{ A PcbDoc header carries no USEDBYPRIMS field, which a PcbLib does, so a      }
+{ board cannot be asked which mechanical layers its geometry occupies. The     }
+{ only way to know is to count, and not knowing is what makes moving kinds     }
+{ around on a board unsafe: a layer that looks spare can be carrying the       }
+{ assembly drawing.                                                            }
+
+Function PCB_CountPrimitivesOnLayer(Board : IPCB_Board; Lyr : TLayer) : Integer;
+Var
+    Iterator : IPCB_BoardIterator;
+    Prim : IPCB_Primitive;
+Begin
+    Result := 0;
+    Iterator := Nil;
+    Try
+        Iterator := Board.BoardIterator_Create;
+        { No object filter. A single-type filter would count tracks and       }
+        { miss the strings, arcs, fills and regions that assembly and         }
+        { fabrication layers are mostly made of, and report a populated       }
+        { layer as empty.                                                     }
+        Iterator.AddFilter_LayerSet(MkSet(Lyr));
+        Iterator.AddFilter_Method(eProcessAll);
+        Prim := Iterator.FirstPCBObject;
+        While Prim <> Nil Do
+        Begin
+            Result := Result + 1;
+            Prim := Iterator.NextPCBObject;
+        End;
+    Except
+        Result := -1;
+    End;
+    If Iterator <> Nil Then
+        Try Board.BoardIterator_Destroy(Iterator); Except End;
+End;
+
 Function PCB_GetMechLayerNames(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
     LayerStack : IPCB_LayerStack_V7;
     LayerObj : IPCB_LayerObject_V7;
     Lyr : TLayer;
-    JsonItems, NameStr : String;
-    First, Disp : Boolean;
-    Count, KindId : Integer;
+    JsonItems, NameStr, CountedStr : String;
+    First, Disp, Enabled, WantAll : Boolean;
+    Count, KindId, Num, Prims, Occupied : Integer;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -9706,40 +9782,68 @@ Begin
         Exit;
     End;
 
+    { Counting walks the board once per layer, so it is opt-out rather than }
+    { forced on a caller who only wants the names.                          }
+    CountedStr := ExtractJsonValue(Params, 'count_primitives');
+    WantAll := (CountedStr <> 'false');
+
     JsonItems := '';
     First := True;
     Count := 0;
+    Occupied := 0;
 
-    For Lyr := eMechanical1 To eMechanical16 Do
+    { ENABLED, NOT DISPLAYED. This reported only layers the view happened to }
+    { be showing, so a layer carrying the whole fabrication drawing was      }
+    { absent from the answer whenever it was toggled off. Display is a view  }
+    { setting; enablement is a property of the board.                       }
+    For Num := 1 To MechScanLimit Do
     Begin
+        Lyr := MechLayerFromNumber(Num);
+        If Lyr = eNoLayer Then Continue;
+
         LayerObj := Nil;
         Try LayerObj := LayerStack.LayerObject_V7[Lyr]; Except LayerObj := Nil; End;
-        If LayerObj <> Nil Then
-        Begin
-            Disp := False;
-            Try Disp := Board.LayerIsDisplayed[Lyr]; Except End;
-            If Disp Then
-            Begin
-                NameStr := '';
-                Try NameStr := LayerObj.Name; Except End;
-                { The kind says what the layer is FOR, and a caller setting  }
-                { one needs to see what is already taken: a kind belongs to  }
-                { a single layer. -1 means this build has no kinds at all.   }
-                KindId := ReadMechKind(LayerObj);
-                If Not First Then JsonItems := JsonItems + ',';
-                First := False;
-                JsonItems := JsonItems
-                    + '{"layer":"' + EscapeJsonString(GetLayerString(Lyr)) + '",'
-                    + '"name":"' + EscapeJsonString(NameStr) + '",'
-                    + '"kind":"' + EscapeJsonString(MechKindToString(KindId)) + '",'
-                    + '"kind_id":' + IntToStr(KindId) + '}';
-                Inc(Count);
-            End;
-        End;
+        If LayerObj = Nil Then Continue;
+
+        Enabled := False;
+        Try Enabled := LayerObj.MechanicalLayerEnabled; Except Enabled := False; End;
+        If Not Enabled Then Continue;
+
+        NameStr := '';
+        Try NameStr := LayerObj.Name; Except End;
+        Disp := False;
+        Try Disp := Board.LayerIsDisplayed[Lyr]; Except End;
+        { The kind says what the layer is FOR, and a caller setting one     }
+        { needs to see what is already taken: a kind belongs to a single    }
+        { layer. -1 means this build has no kinds at all.                   }
+        KindId := ReadMechKind(LayerObj);
+
+        Prims := -1;
+        If WantAll Then Prims := PCB_CountPrimitivesOnLayer(Board, Lyr);
+        If Prims > 0 Then Occupied := Occupied + 1;
+
+        If Not First Then JsonItems := JsonItems + ',';
+        First := False;
+        JsonItems := JsonItems
+            + '{"layer":"Mechanical' + IntToStr(Num) + '",'
+            + '"number":' + IntToStr(Num) + ','
+            + '"name":"' + EscapeJsonString(NameStr) + '",'
+            + '"enabled":true,'
+            + '"displayed":' + BoolToJsonStr(Disp) + ','
+            + '"kind":"' + EscapeJsonString(MechKindToString(KindId)) + '",'
+            + '"kind_id":' + IntToStr(KindId) + ','
+            + '"primitive_count":' + IntToStr(Prims) + '}';
+        Inc(Count);
     End;
 
     Result := BuildSuccessResponse(RequestId,
-        '{"mechanical_layers":[' + JsonItems + '],"count":' + IntToStr(Count) + '}');
+        '{"mechanical_layers":[' + JsonItems + '],'
+        + '"count":' + IntToStr(Count) + ','
+        + '"occupied_count":' + IntToStr(Occupied) + ','
+        + '"counted_primitives":' + BoolToJsonStr(WantAll) + ','
+        { The scan stops here, so a layer above it is unreported rather   }
+        { than reported empty.                                             }
+        + '"scanned_to":' + IntToStr(MechScanLimit) + '}');
 End;
 
 {..............................................................................}
@@ -11755,6 +11859,7 @@ Begin
         'remove_layer':            Result := PCB_RemoveLayer(Params, RequestId);
         'modify_layer':            Result := PCB_ModifyLayer(Params, RequestId);
         'set_mech_layer_kind':     Result := PCB_SetMechLayerKind(Params, RequestId);
+        'set_mech_layers':         Result := PCB_SetMechLayers(Params, RequestId);
         'get_layer_display':       Result := PCB_GetLayerDisplay(Params, RequestId);
         'set_layer_color':         Result := PCB_SetLayerColor(Params, RequestId);
         'get_board_outline':       Result := PCB_GetBoardOutline(Params, RequestId);

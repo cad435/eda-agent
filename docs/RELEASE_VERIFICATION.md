@@ -1,4 +1,4 @@
-# Release verification: 2026.08.08.10
+# Release verification: 2026.08.15.1
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -39,6 +39,32 @@ a body, and DelphiScript resolves a property against the object in hand,
 so another interface accepting it proves nothing here. Only
 `StandoffHeight` is entirely unexercised.
 
+### What this release adds, and why it is a different kind of risk
+
+The steps above check whether an identifier exists. The work added in
+`2026.08.15.1` carries almost none of that risk: every Altium property
+and method it touches is already written somewhere in shipped code, so
+an undeclared identifier is close to ruled out by construction. The
+cross-document hints touch no Altium API at all, being string handling
+only.
+
+What it adds instead is **logic that decides what to touch**, which
+fails silently rather than loudly:
+
+| Added | What could go wrong | How you would know |
+|---|---|---|
+| `GetPCBBoardForMutation` | An edit refuses when it should proceed, or proceeds when two boards are open and none focused | Open two PcbDocs, focus neither, run `pcb_delete_object`. It must refuse and name both |
+| Board mechanical layers | A paired kind is written on the layer rather than the pair, which silently does nothing | Set a paired kind, then read it back with `pcb_get_mech_layer_names` |
+| `lib_delete_footprint_primitives` | Removes from the wrong footprint, or takes pads with it | Probe the footprint first, delete one layer, probe again and compare pad count |
+| Library parameter delete | Matches zero and reports success | Delete a named parameter from a library symbol, then read the symbol's parameters |
+| Multi-part scope suffix | Returns part one's pins under another part's name | `lib_get_pin_list` on a multi-part symbol with `@2` and `@3`, and compare the counts |
+| Cross-document hints | The hint is appended to an error it does not apply to, or doubles up on a message that already names a tool | Focus a SchDoc and run `pcb_delete_object`. The refusal must name the PCB tool once, and read as one sentence |
+
+None of these can halt the polling loop the way an undeclared
+identifier does, so they are safe to run in any order and safe to run
+last. The cost of getting one wrong is a wrong answer, not a dead
+bridge.
+
 ---
 
 ## Gather these before you start
@@ -70,7 +96,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.08.10`, `version_match` =
+Expect `altium_script_version` = `2026.08.15.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.

@@ -642,6 +642,47 @@ End;
 { wraps this in PreProcess/PostProcess.                                       }
 {..............................................................................}
 
+{ Remove every parameter of ONE component that matches the filter.           }
+{                                                                             }
+{ Re-scans after each removal rather than deleting inside the walk: removing  }
+{ a child invalidates the iterator, and a walk that continues past it skips   }
+{ entries, which reads as a filter that matched less than it did.             }
+
+Procedure RemoveMatchingParamsFromComponent(Comp : ISch_Component;
+    ReducedFilter : String; Var TotalMatched : Integer);
+Var
+    ParamIter : ISch_Iterator;
+    Param, FoundParam : ISch_GraphicalObject;
+    Guard : Integer;
+Begin
+    If Comp = Nil Then Exit;
+    Guard := 10000;
+    While Guard > 0 Do
+    Begin
+        FoundParam := Nil;
+        ParamIter := Comp.SchIterator_Create;
+        Try
+            ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
+            Param := ParamIter.FirstSchObject;
+            While Param <> Nil Do
+            Begin
+                If MatchesFilter(Param, ReducedFilter) Then
+                Begin
+                    FoundParam := Param;
+                    Break;
+                End;
+                Param := ParamIter.NextSchObject;
+            End;
+        Finally
+            Comp.SchIterator_Destroy(ParamIter);
+        End;
+        If FoundParam = Nil Then Break;
+        Comp.RemoveSchObject(FoundParam);
+        Inc(TotalMatched);
+        Dec(Guard);
+    End;
+End;
+
 Procedure DeleteParametersAnyOwner(SchDoc : ISch_Document; FilterStr : String;
     Var TotalMatched : Integer);
 Var
@@ -650,9 +691,37 @@ Var
     Comp : ISch_Component;
     Param, FoundParam : ISch_GraphicalObject;
     Guard : Integer;
+    IsLib : Boolean;
 Begin
     ReducedFilter := FilterStr;
     OwnerDesig := PullOwnerDesignator(ReducedFilter);
+
+    { A SCHLIB HAS NO PLACED COMPONENTS TO ITERATE.                          }
+    {                                                                         }
+    { The component walk below uses SchIterator with an eSchComponent filter, }
+    { which returns nothing at all on a library: a SchLib's symbols are not   }
+    { components placed on its canvas, each is its own internal sheet. So     }
+    { every parameter delete against a library reported matched 0 while the   }
+    { parameters sat there, and the document-level pass that followed saw     }
+    { only the library's OWN parameter, which is why a read came back with    }
+    { one entry called Value rather than the component's full set.            }
+    {                                                                         }
+    { The symbol is already known: a lib_component scope resolves through     }
+    { SelectLibComponentPart, which records it. So use it directly instead of }
+    { looking for something a library does not contain.                       }
+    IsLib := False;
+    Try IsLib := (SchDoc.ObjectId = eSchLib); Except IsLib := False; End;
+    If IsLib Then
+    Begin
+        { Same guard as the sheet path: without a filter this would strip     }
+        { every parameter off the symbol.                                     }
+        If ReducedFilter = '' Then Exit;
+        Comp := LastCreatedLibComponent;
+        If Comp = Nil Then
+            Try Comp := SchDoc.CurrentSchComponent; Except Comp := Nil; End;
+        RemoveMatchingParamsFromComponent(Comp, ReducedFilter, TotalMatched);
+        Exit;
+    End;
 
     { Component-owned parameters. Guard against a catastrophic "delete every   }
     { parameter on every part": require an owner designator or a non-empty     }
@@ -670,34 +739,10 @@ Begin
                 If (OwnerDesig = '') Or
                    (UpperCase(CompDesig) = UpperCase(OwnerDesig)) Then
                 Begin
-                    { Re-scan after each removal to avoid iterator            }
-                    { invalidation; removing a child does not disturb the     }
-                    { outer component iterator.                               }
-                    Guard := 10000;
-                    While Guard > 0 Do
-                    Begin
-                        FoundParam := Nil;
-                        ParamIter := Comp.SchIterator_Create;
-                        Try
-                            ParamIter.AddFilter_ObjectSet(MkSet(eParameter));
-                            Param := ParamIter.FirstSchObject;
-                            While Param <> Nil Do
-                            Begin
-                                If MatchesFilter(Param, ReducedFilter) Then
-                                Begin
-                                    FoundParam := Param;
-                                    Break;
-                                End;
-                                Param := ParamIter.NextSchObject;
-                            End;
-                        Finally
-                            Comp.SchIterator_Destroy(ParamIter);
-                        End;
-                        If FoundParam = Nil Then Break;
-                        Comp.RemoveSchObject(FoundParam);
-                        Inc(TotalMatched);
-                        Dec(Guard);
-                    End;
+                    { Removing a child does not disturb the outer         }
+                    { component iterator, so the shared helper is safe here. }
+                    RemoveMatchingParamsFromComponent(
+                        Comp, ReducedFilter, TotalMatched);
                 End;
                 Comp := CompIter.NextSchObject;
             End;

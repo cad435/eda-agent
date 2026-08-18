@@ -717,6 +717,29 @@ End;
 { which is why the map has a hole in it rather than an off-by-one.            }
 {..............................................................................}
 
+{ PCB object-type name to its TObjectId value, or -1 when unknown.            }
+{                                                                              }
+{ Lives HERE rather than beside the PCB iteration helpers because Library.pas  }
+{ builds before PCBGeneric.pas. Calling it from there resolved to nothing at   }
+{ runtime and took the scripting engine down with an access violation rather   }
+{ than a compile error, since DelphiScript has no forward declarations.        }
+
+Function ObjectTypeFromStringPCB(TypeStr : String) : Integer;
+Begin
+    Result := -1;
+    If TypeStr = 'eTrackObject'         Then Result := eTrackObject
+    Else If TypeStr = 'ePadObject'      Then Result := ePadObject
+    Else If TypeStr = 'eViaObject'      Then Result := eViaObject
+    Else If TypeStr = 'eComponentObject' Then Result := eComponentObject
+    Else If TypeStr = 'eArcObject'      Then Result := eArcObject
+    Else If TypeStr = 'eFillObject'     Then Result := eFillObject
+    Else If TypeStr = 'eTextObject'     Then Result := eTextObject
+    Else If TypeStr = 'ePolyObject'     Then Result := ePolyObject
+    Else If TypeStr = 'eRegionObject'   Then Result := eRegionObject
+    Else If TypeStr = 'eRuleObject'     Then Result := eRuleObject
+    Else If TypeStr = 'eDimensionObject' Then Result := eDimensionObject;
+End;
+
 Function MechKindToString(K : Integer) : String;
 Begin
     Case K Of
