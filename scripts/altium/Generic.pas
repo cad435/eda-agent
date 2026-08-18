@@ -2277,6 +2277,7 @@ Var
     Scope, ObjTypeStr, FilterStr, SetStr : String;
     ScopeType, ScopePath : String;
     ObjTypeInt, PipePos : Integer;
+    IsPCBType : Boolean;
     TotalMatched, OpCount, OpSkipped, OpMatched : Integer;
     ResultJson, ResultsJson : String;
     UseTilde : Boolean;
@@ -2346,6 +2347,7 @@ Begin
         { what made the original bug invisible.                             }
         OpMatched := 0;
         ObjTypeInt := -1;
+        IsPCBType := False;
         ScopeType := '';
         ScopePath := '';
 
@@ -2358,21 +2360,39 @@ Begin
         If Note = '' Then
         Begin
             ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
+            { PCB object types live in a SEPARATE resolver. Without this      }
+            { fallback every PCB op is recorded as unknown_object_type and    }
+            { nothing is written, which reads as a bad object_type rather     }
+            { than as a path that does not reach the board. Mirrors the       }
+            { dispatch in Gen_ModifyObjects.                                  }
+            If ObjTypeInt = -1 Then
+            Begin
+                ObjTypeInt := ObjectTypeFromStringPCB(ObjTypeStr);
+                IsPCBType := ObjTypeInt <> -1;
+            End;
             If ObjTypeInt = -1 Then Note := 'unknown_object_type';
         End;
 
         If Note = '' Then
         Begin
             ParseScope(Scope, ScopeType, ScopePath);
+            { The refusal Gen_ModifyObjects makes for the same case, recorded }
+            { per op instead of failing the batch: PCB primitives live on a   }
+            { board and this path only ever reaches the active one, so any    }
+            { other scope would be silently ignored.                          }
+            If IsPCBType And (ScopeType <> 'active_doc') Then
+                Note := 'pcb_scope_not_supported'
             { lib_component scope: select the symbol; report if it's gone. }
-            If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
+            Else If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
                 Note := 'lib_component_not_found';
         End;
 
         If Note = '' Then
         Begin
             OpResult := '';
-            If ScopeType = 'project' Then
+            If IsPCBType Then
+                OpResult := ProcessActivePCBDoc(ObjTypeInt, FilterStr, '', SetStr, 'modify', RequestId, 0)
+            Else If ScopeType = 'project' Then
                 OpResult := IterateProjectDocs(ObjTypeInt, FilterStr, '', SetStr, 'modify', RequestId, ScopePath, 0)
             Else If ScopeType = 'doc' Then
                 OpResult := ProcessDocByPath(ScopePath, ObjTypeInt, FilterStr, '', SetStr, 'modify', RequestId, 0)

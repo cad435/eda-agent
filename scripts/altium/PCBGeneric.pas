@@ -130,11 +130,14 @@ Begin
         Begin
             { Component Name is an IPCB_Text; return its .Text, not the object }
             { (Dispatch->OleStr otherwise crashed EscapeJsonString via modal). }
-            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Name.Text; End;
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Name.Text; End
+            { Pad designator is a plain string on IPCB_Pad, not an IPCB_Text. }
+            Else If Oid = ePadObject Then Begin Pad := Obj; Result := Pad.Name; End;
         End
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
         Begin
-            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Name.Text; End;
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := Comp.Name.Text; End
+            Else If Oid = ePadObject Then Begin Pad := Obj; Result := Pad.Name; End;
         End
         Else If (PropName = 'Comment') Or (PropName = 'Comment.Text') Then
         Begin
@@ -326,6 +329,13 @@ Begin
         Else If PropName = 'TopYSize' Then
         Begin
             If Oid = ePadObject Then Begin Pad := Obj; Pad.TopYSize := MilsToCoord(StrToIntDef(Value, 0)); End;
+        End
+        Else If (PropName = 'Name') Or (PropName = 'Designator') Then
+        Begin
+            { Pad designator. Plain string member, settable on IPCB_Pad.      }
+            { Component names are deliberately NOT settable here, renaming a  }
+            { component is a schematic-side operation.                        }
+            If Oid = ePadObject Then Begin Pad := Obj; Pad.Name := Value; End;
         End
         Else If PropName = 'Text' Then
         Begin
