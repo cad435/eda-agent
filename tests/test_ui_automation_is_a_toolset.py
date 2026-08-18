@@ -398,3 +398,123 @@ async def test_a_drive_that_stopped_for_a_human_is_not_a_success(
         "a command that raised something nobody could answer has not "
         "succeeded, whatever the driver's own ok says")
     assert out["dialogs"]["stopped_for_a_human"] is True
+
+
+# --------------------------------------------------------------------
+# A press that changed nothing is not a success.
+#
+# MEASURED 2026-08-18 against a wedged Altium. The dialog was
+# "Comparator Results (No Differences)" with a single OK button, the
+# window pumped WM_NULL and answered IsHungAppWindow with False, and it
+# acted on nothing: a posted click, BM_CLICK, WM_COMMAND to the parent
+# panel, VK_RETURN and even a real synthesized mouse click at the
+# button's screen position all left it open.
+#
+# app_press_dialog_button returned ok true for every one of those. That
+# is the same defect this session spent the day removing from
+# app_run_menu and proj_sync_pcb, sitting in the tool written to
+# replace them.
+#
+# Staying open is NORMAL for some presses, which is why closure alone
+# cannot be the test: Validate Changes deliberately leaves the change
+# order up, and a wizard page advances without closing its window. The
+# verdict turns on the button's ROLE and on whether it was the only way
+# out of the dialog.
+# --------------------------------------------------------------------
+
+def _dialog(buttons, title="Comparator Results (No Differences)"):
+    return real_windows.Window(
+        hwnd=99, class_name="TMessageForm", title=title, pid=1,
+        controls=[real_windows.Control(hwnd=i, class_name="TXPBitBtn",
+                                       text=t, style=0, enabled=True)
+                  for i, t in enumerate(buttons, start=1)])
+
+
+class _StuckWindows(_FakeWindows):
+    """A screen where the press lands but nothing happens."""
+
+    def wait_for_close(self, hwnd, timeout=5.0):
+        return False
+
+
+@pytest.mark.asyncio
+async def test_a_sole_dismiss_that_leaves_the_dialog_open_is_a_failure(
+        monkeypatch):
+    """The exact live case, and the regression this file is named for."""
+    fake = _StuckWindows([_dialog(["OK"])])
+    monkeypatch.setattr(uiauto, "windows", fake)
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (1234, None))
+
+    out = await _tools()["app_press_dialog_button"]("OK")
+
+    assert fake.clicked == ["OK"], "the press must still be attempted"
+    assert out["ok"] is False, (
+        "the only button on the dialog was pressed and the dialog is "
+        "still there; reporting success hides a wedged editor")
+    assert out["dialog_closed"] is False
+    assert "did not take" in out["reason"]
+
+
+@pytest.mark.asyncio
+async def test_a_dismiss_that_closes_the_dialog_is_a_success(monkeypatch):
+    """The other direction, so the check cannot just always fail."""
+    fake = _FakeWindows([_dialog(["OK"])])
+    monkeypatch.setattr(uiauto, "windows", fake)
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (1234, None))
+
+    out = await _tools()["app_press_dialog_button"]("OK")
+
+    assert out["ok"] is True and out["dialog_closed"] is True
+    assert out["outcome_verified"] is True
+
+
+@pytest.mark.asyncio
+async def test_validate_may_leave_the_change_order_open(monkeypatch):
+    """Not every press is meant to close its dialog.
+
+    Validate Changes is the case that makes closure the wrong test on
+    its own: it deliberately leaves the order up so the result can be
+    read, and judging it by the window going away would report a
+    correct press as broken.
+    """
+    fake = _StuckWindows([_dialog(
+        ["Validate Changes", "Execute Changes", "Close"],
+        title="Engineering Change Order")])
+    monkeypatch.setattr(uiauto, "windows", fake)
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (1234, None))
+
+    out = await _tools()["app_press_dialog_button"]("Validate Changes")
+
+    assert out["ok"] is True, "a validate press is not judged by closure"
+    assert out["dialog_closed"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_dismiss_with_another_way_out_is_not_condemned(monkeypatch):
+    """Only the SOLE way out can be judged by the window closing.
+
+    With more than one button the dialog may legitimately stay up while
+    something else is chosen, so this must not be treated as a failure
+    on the strength of closure alone.
+    """
+    fake = _StuckWindows([_dialog(["OK", "Cancel"])])
+    monkeypatch.setattr(uiauto, "windows", fake)
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (1234, None))
+
+    out = await _tools()["app_press_dialog_button"]("OK")
+
+    assert out["ok"] is True
+
+
+def test_a_posted_click_aims_at_the_middle_of_the_control():
+    """lParam 0 is the top-left CORNER, which a VCL button may miss.
+
+    The same mistake put a click at a grid's origin and selected its
+    first row, which is recorded in select_row's own guard.
+    """
+    import inspect
+
+    source = inspect.getsource(real_windows.click)
+    assert "GetClientRect" in source, (
+        "the press must compute a point inside the control")
+    assert "lparam" in source

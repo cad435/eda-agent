@@ -471,9 +471,22 @@ def click(control: Control) -> None:
     if control.class_name.lower() == "button":
         win32gui.SendMessage(control.hwnd, win32con.BM_CLICK, 0, 0)
         return
+    # lParam is the pointer position in CLIENT coordinates, and it used
+    # to be 0, which is the top-left CORNER of the control. A VCL
+    # button tracks where the press landed and can treat the corner
+    # pixel as a miss or as being on the border. The same mistake in
+    # select_row put a click at a grid's origin and selected its first
+    # row. Aim at the middle instead.
+    lparam = 0
+    try:
+        left, top, right, bottom = win32gui.GetClientRect(control.hwnd)
+        x, y = (right - left) // 2, (bottom - top) // 2
+        lparam = ((y & 0xFFFF) << 16) | (x & 0xFFFF)
+    except Exception:                            # pragma: no cover - guard
+        pass
     win32gui.PostMessage(control.hwnd, win32con.WM_LBUTTONDOWN,
-                         win32con.MK_LBUTTON, 0)
-    win32gui.PostMessage(control.hwnd, win32con.WM_LBUTTONUP, 0, 0)
+                         win32con.MK_LBUTTON, lparam)
+    win32gui.PostMessage(control.hwnd, win32con.WM_LBUTTONUP, 0, lparam)
 
 
 def close_window(hwnd: int) -> None:

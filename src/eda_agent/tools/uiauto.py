@@ -513,9 +513,39 @@ def register_uiauto_tools(mcp):
 
             windows.click(button)
             closed = windows.wait_for_close(target.hwnd, timeout=5.0)
+
+            # A press that changed nothing is not a success. MEASURED
+            # 2026-08-18 on a wedged Altium: the only button was OK, the
+            # message went out, the dialog stayed, and this returned
+            # ok true. That is the same defect as a handler asserting an
+            # outcome it never checked, in the tool written to avoid it.
+            #
+            # Staying open is NORMAL for some presses: Validate Changes
+            # leaves the change order up on purpose, and a wizard page
+            # advances without closing its window. So the verdict turns
+            # on the ROLE, not on closure alone. Only a press whose
+            # whole job is to dismiss can be judged by the window going
+            # away, and only when it was the sole way out.
+            dismissing = role in ("dismiss", "advance")
+            only_way_out = len(target.buttons()) == 1
+            if not closed and dismissing and only_way_out:
+                return {
+                    "ok": False,
+                    "dialog": target.title,
+                    "pressed": button.text,
+                    "role": role,
+                    "dialog_closed": False,
+                    "reason": (
+                        f"{button.text!r} was the only button on "
+                        f"{target.title!r} and the dialog is still open, so "
+                        f"the press did not take. Altium can reach a state "
+                        f"where the window pumps messages but acts on none "
+                        f"of them, and no synthetic press will clear it."),
+                }
             return {"ok": True, "dialog": target.title,
                     "pressed": button.text, "role": role,
-                    "dialog_closed": closed}
+                    "dialog_closed": closed,
+                    "outcome_verified": bool(closed) or not dismissing}
 
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(None, press)
