@@ -3359,6 +3359,8 @@ Var
     PcbPath : String;
     Data : String;
     Ok : Boolean;
+    FocusedDoc : IDocument;
+    FocusedKind : String;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
 
@@ -3368,6 +3370,33 @@ Begin
     If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
     Else Project := Workspace.DM_FocusedProject;
     If Project = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found'); Exit; End;
+
+    { REFUSE while a schematic is focused. MEASURED 2026-08-17: with a
+      child sheet focused, WorkspaceManager:Compare raised a modal reading
+      "Cannot compare a source document against its owner project SCH"
+      and changed nothing, while this handler went on to report success
+      and components_in_sync. Catching it here turns a blocked editor
+      plus a false clean into a reason the caller can act on.
+
+      NOT applied to Proj_UpdateSchematic, which is the opposite
+      direction and whose correct focus has not been measured. Guessing
+      symmetry here would be inventing a precondition. }
+    FocusedKind := '';
+    Try
+        FocusedDoc := Workspace.DM_FocusedDocument;
+        If FocusedDoc <> Nil Then FocusedKind := FocusedDoc.DM_DocumentKind;
+    Except
+        FocusedKind := '';
+    End;
+    If FocusedKind = 'SCH' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRONG_FOCUS',
+            'A schematic is focused, and Altium refuses to compare a '
+            + 'source document against its owner project: it raises a '
+            + 'modal error and changes nothing. Focus the PCB document '
+            + 'first with app_set_active_document, then call this again.');
+        Exit;
+    End;
 
     SmartCompile(Project);
     Ok := ComputeECODifferences(Project, MatchedBefore, ExtraSchBefore, ExtraPcbBefore, PcbPath);
@@ -3410,13 +3439,31 @@ Begin
     Data := Data + ',"extra_in_pcb":' + IntToStr(ExtraPcbAfter) + '}';
     Data := Data + ',"components_added_to_pcb":' + IntToStr(ExtraSchBefore - ExtraSchAfter);
     Data := Data + ',"components_removed_from_pcb":' + IntToStr(ExtraPcbBefore - ExtraPcbAfter);
-    Data := Data + ',"in_sync":' + BoolToJsonStr((ExtraSchAfter = 0) And (ExtraPcbAfter = 0));
-    { Heuristic: if counts didn't change, the ECO dialog probably opened for
-      user confirmation (older Altium). In that case we flag it so the caller
-      / user knows to click Execute Changes. }
-    Data := Data + ',"dialog_may_have_opened":' +
-        BoolToJsonStr((ExtraSchBefore = ExtraSchAfter) And (ExtraPcbBefore = ExtraPcbAfter) And
-                      ((ExtraSchBefore + ExtraPcbBefore) > 0));
+
+    { COMPONENTS_IN_SYNC, not in_sync. These counters describe component
+      PRESENCE and nothing else, so the old "in_sync" claimed far more
+      than it measured: with a component's Comment differing between
+      schematic and board, the counts are equal and it reported true.
+      MEASURED 2026-08-17, and it reported in_sync while a real
+      difference was pending. Renamed so the field says what it counts. }
+    Data := Data + ',"components_in_sync":' + BoolToJsonStr((ExtraSchAfter = 0) And (ExtraPcbAfter = 0));
+    Data := Data + ',"in_sync_note":"Counts component PRESENCE only. '
+        + 'Parameter, footprint and net differences are NOT included, so '
+        + 'true here does NOT mean the documents agree."';
+
+    { The old dialog_may_have_opened was a guess from unchanged counts,
+      and it was wrong in BOTH measured cases: false when the No
+      Differences dialog had opened, and true whenever a change order
+      was cancelled. This handler genuinely cannot tell. It fires a
+      process and its own thread is blocked while any modal is up, so it
+      has nothing to observe. Say so, and name the tool that CAN look,
+      which works precisely because it does not use this bridge. }
+    Data := Data + ',"dialog_outcome_verified":false';
+    Data := Data + ',"dialog_note":"Whether a dialog appeared, and what '
+        + 'it said, cannot be determined from inside this handler: the '
+        + 'script thread is blocked while a modal is up. Call '
+        + 'app_list_open_dialogs, which reads the Win32 windows directly '
+        + 'and answers even while Altium is blocked."';
     Data := Data + '}';
     Result := BuildSuccessResponse(RequestId, Data);
 End;
