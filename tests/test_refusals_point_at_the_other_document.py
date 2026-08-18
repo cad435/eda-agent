@@ -42,6 +42,8 @@ _NO_HINT_NEEDED = {
     "WRONG_DOCUMENT_FOCUSED": "already names asked-for and actual",
     "WRONG_LIBRARY": "already names asked-for and actual",
     "WRONG_DOC_KIND": "already says to pass sheet_path",
+    "WRONG_FOCUS": "already names the document to focus and the tool "
+                   "that focuses it",
 }
 
 

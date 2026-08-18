@@ -59,8 +59,29 @@ def _build_id_for_current_source() -> str:
 
 
 def test_the_files_this_guards_exist():
-    for path in (_MAIN, _MANIFEST, _STAMP, _PACKAGE):
+    """The tracked inputs. The .eext is deliberately not among them.
+
+    It is a build artefact and gitignored, so it exists on a machine
+    that has run build.py and nowhere else. Requiring it here failed
+    every CI run while proving nothing: the check that matters is the
+    content hash below, which compares the stamp against what build.py
+    would compute from the source and needs no package to do it.
+    """
+    for path in (_MAIN, _MANIFEST, _STAMP):
         assert path.is_file(), f"{path.name} is missing"
+
+
+def test_the_package_is_a_build_artefact_and_not_tracked():
+    """Pin the reason the file above is absent, so it is not restored.
+
+    If the .eext is ever committed, this fails and someone decides
+    deliberately rather than discovering it through a CI failure.
+    """
+    ignore = (pathlib.Path(__file__).resolve().parent.parent
+              / ".gitignore").read_text(encoding="utf-8")
+    assert ".eext" in ignore, (
+        "the packaged extension is no longer ignored; either restore "
+        "the ignore rule or add the package back to the existence check")
 
 
 def test_the_stamp_matches_the_manifest_version():

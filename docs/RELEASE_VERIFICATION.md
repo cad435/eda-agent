@@ -1,4 +1,4 @@
-# Release verification: 2026.08.15.1
+# Release verification: 2026.08.18.3
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -41,12 +41,24 @@ so another interface accepting it proves nothing here. Only
 
 ### What this release adds, and why it is a different kind of risk
 
-The steps above check whether an identifier exists. The work added in
-`2026.08.15.1` carries almost none of that risk: every Altium property
-and method it touches is already written somewhere in shipped code, so
-an undeclared identifier is close to ruled out by construction. The
-cross-document hints touch no Altium API at all, being string handling
-only.
+The steps above check whether an identifier exists. This release
+carries almost none of that risk: every Altium property and method it
+touches is already written somewhere in shipped code, so an undeclared
+identifier is close to ruled out by construction. The cross-document
+hints touch no Altium API at all, being string handling only.
+
+`Proj_UpdatePCB` now reads `DM_FocusedDocument` and `DM_DocumentKind`
+before comparing, and refuses while a schematic is focused. Both
+identifiers are already used across several units, so neither is new
+exposure. Everything else is string handling: the reply fields that
+used to overstate what had been checked, and the removal of the
+`Client:RunMenu` fallback in `App_ExecuteMenu`, which now refuses an
+unmapped path instead of guessing a MenuID.
+
+One thing here cannot be settled by running the steps below. The
+refusal is deliberately absent from `Proj_UpdateSchematic`, the
+opposite direction, because the focus Altium wants there has never been
+measured. If you exercise that direction, record what it does.
 
 What it adds instead is **logic that decides what to touch**, which
 fails silently rather than loudly:
@@ -96,7 +108,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.15.1`, `version_match` =
+Expect `altium_script_version` = `2026.08.18.3`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.

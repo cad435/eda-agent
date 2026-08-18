@@ -31,6 +31,23 @@ class _FakeMcp:
         return deco
 
 
+@pytest.fixture(autouse=True)
+def _altium_is_present(monkeypatch):
+    """Answer the process lookup without a real Altium.
+
+    Every tool here resolves a process id first and returns early if
+    there is none. Nothing stubbed that, so the whole file passed on a
+    machine with Altium open and failed everywhere else: green locally,
+    eight failures in CI. The tools are about DECIDING what to press,
+    which has nothing to do with whether an editor happens to be
+    running, so the lookup is answered here and the decisions are what
+    gets tested.
+    """
+    from eda_agent.tools import uiauto
+
+    monkeypatch.setattr(uiauto, "_altium_pid", lambda: (4242, None))
+
+
 @pytest.fixture
 def update_tool():
     from eda_agent.tools.uiauto import register_uiauto_tools
