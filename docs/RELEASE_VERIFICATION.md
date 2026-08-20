@@ -1,4 +1,4 @@
-# Release verification: 2026.08.18.3
+# Release verification: 2026.08.20.1
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -60,6 +60,25 @@ refusal is deliberately absent from `Proj_UpdateSchematic`, the
 opposite direction, because the focus Altium wants there has never been
 measured. If you exercise that direction, record what it does.
 
+Footprint height is the same shape of risk, which is to say almost
+none. `Lib_SetFootprintHeight` writes `Footprint.Height`, which the
+height sweep beside it has always written, and reads the library
+through the same iterator thirty-odd other handlers use. What is new is
+a DIRECTION: the sweep can now lower a height to the model, not only
+raise it. Check it by setting a footprint absurdly tall by hand, running
+the sweep in `match` mode, and confirming it comes back down. Confirm
+the reverse too, that `raise` leaves it alone, because a mode that
+ignores its argument would pass the first test on its own.
+
+The case worth being careful about is a footprint with NO 3D body. It
+must not be written at all. Writing the 0 that an absent model implies
+does not relax placement-collision DRC, it disables it for that part,
+and doing that across every unmodelled footprint would switch the rule
+off wholesale while reporting a clean sweep. Run `match` on a library
+where at least one footprint has no model, and check that footprint's
+height is untouched and that its name comes back under
+`without_model_names`.
+
 What it adds instead is **logic that decides what to touch**, which
 fails silently rather than loudly:
 
@@ -108,7 +127,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.18.3`, `version_match` =
+Expect `altium_script_version` = `2026.08.20.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.

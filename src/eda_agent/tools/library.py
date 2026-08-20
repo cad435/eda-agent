@@ -1768,11 +1768,12 @@ def register_library_tools(mcp):
     # =========================================================================
 
     @mcp.tool()
-    async def lib_update_footprint_heights_from_3d() -> dict[str, Any]:
+    async def lib_update_footprint_heights_from_3d(
+        mode: str = "raise",
+    ) -> dict[str, Any]:
         """Sweep the active PCB Library: for every footprint, find the
-        tallest 3D body and propagate its ``OverallHeight`` up to
-        ``Footprint.Height`` when the model is taller than the
-        currently-stored value.
+        tallest 3D body and write its ``OverallHeight`` to
+        ``Footprint.Height``.
 
         Footprint.Height is what Altium's placement-collision DRC
         uses to enforce height-clearance rules (don't place a tall
@@ -1782,26 +1783,97 @@ def register_library_tools(mcp):
         to 0 which makes the DRC silently no-op -- a real production
         risk caught only at first-article assembly.
 
+        Args:
+            mode: ``raise`` (default) only ever increases a height, so a
+                hand-set "I know this part is 5mm despite the model
+                being 3mm" survives. ``match`` also LOWERS one to the
+                model.
+
+        Reach for ``match`` when heights are too TALL, which raising
+        cannot fix and which is the more damaging fault: a footprint
+        claiming 50mm when the part is 3mm fails placement-collision
+        DRC against everything near it and blocks placements that are
+        fine, where a too-low height merely fails to catch a real
+        collision. To correct one footprint, or one with no model at
+        all, use ``lib_set_footprint_height``.
+
         Safety:
-          - Only updates footprints whose 3D model is TALLER than
-            the current Height -- never shrinks. Protects a manual
-            "I know this part is 5mm despite the model being 3mm"
-            override.
-          - Does NOT save the library; the agent should review the
-            ``items[]`` diff and save via the Altium UI or by
-            re-opening to confirm.
+          - NEITHER MODE WRITES ZERO. A footprint with no 3D body
+            yields no measurement, and writing the 0 that implies would
+            silently disable the very DRC rule this arms. Those come
+            back as ``without_model`` with their names.
+          - Does NOT save the library; review the ``items[]`` diff and
+            save in Altium.
 
         Returns:
-            Dict with:
-              - ``inspected``: total footprints walked
-              - ``updated``: footprints whose Height was raised
-              - ``items``: per-footprint diff
-                ``{name, old_height_mm, new_height_mm}``
+            Dict with ``mode``, ``inspected``, ``updated``, ``lowered``,
+            ``without_model``, ``without_model_names``, and ``items``
+            (``{name, old_height_mm, new_height_mm}`` per footprint).
         """
+        mode = (mode or "raise").strip().lower()
+        if mode not in ("raise", "match"):
+            return {
+                "ok": False,
+                "reason": (
+                    f"mode must be 'raise' (only increase, the default) or "
+                    f"'match' (also lower to the model). Got {mode!r}."),
+            }
         bridge = get_bridge()
         return await bridge.send_command_async(
-            "library.update_footprint_heights_from_3d", {},
+            "library.update_footprint_heights_from_3d", {"mode": mode},
             timeout=60.0,
+        )
+
+    @mcp.tool()
+    async def lib_set_footprint_height(
+        height_mm: float,
+        footprint_name: str = "",
+    ) -> dict[str, Any]:
+        """Set one footprint's Height directly, up or down.
+
+        The sweep can only derive a height from a 3D body, which leaves
+        two cases it cannot serve: a part with no model, and a part
+        whose model is wrong. There was no setter at all before this, so
+        a footprint carrying an absurd height could be read and not
+        corrected.
+
+        WHY TOO TALL IS WORSE THAN TOO SHORT. Footprint.Height drives
+        placement-collision DRC. A footprint claiming 50mm when the part
+        is 3mm fails against everything near it and blocks placements
+        that are fine. A too-low height only fails to catch a real
+        collision. The first floods the report and gets the rule
+        switched off; the second is quiet.
+
+        ZERO IS ACCEPTED AND IS NOT NEUTRAL. It disables the rule for
+        that footprint rather than relaxing it, so nothing is ever
+        flagged against it however tall the real part is. The reply says
+        so when zero is written.
+
+        Args:
+            height_mm: the height in MILLIMETRES, not mils. Must be
+                non-negative.
+            footprint_name: which footprint. Empty uses the library's
+                current component.
+
+        Returns:
+            ``{name, old_height_mm, new_height_mm, changed, saved,
+            save_note, note}``. ``saved`` is always false: the library
+            is modified in memory and left for you to review and save.
+        """
+        try:
+            height = float(height_mm)
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "reason": f"height_mm must be a number, got {height_mm!r}"}
+        if height < 0 or height != height:      # NaN fails both comparisons
+            return {"ok": False,
+                    "reason": (f"height_mm must be a non-negative number of "
+                               f"millimetres, got {height_mm!r}")}
+
+        bridge = get_bridge()
+        return await bridge.send_command_async(
+            "library.set_footprint_height",
+            {"height_mm": height, "footprint_name": footprint_name},
         )
 
     @mcp.tool()

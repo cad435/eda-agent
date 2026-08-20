@@ -6319,9 +6319,20 @@ End;
 { but libraries shipped without explicit heights default to 0, which         }
 { effectively disables that check.                                            }
 {                                                                              }
-{ Updates only when the 3D model is TALLER than the current Footprint.Height }
-{ -- this matches the common convention and protects against a               }
-{ manually-set "I know this part is 5mm despite the model being 3mm" value.  }
+{ mode = 'raise' (default) updates only when the 3D model is TALLER than the }
+{ current Footprint.Height. That protects a manually-set "I know this part   }
+{ is 5mm despite the model being 3mm" value, and it is the right default.     }
+{                                                                              }
+{ mode = 'match' also LOWERS a height to the model. Raising alone cannot fix  }
+{ the opposite fault, and an over-tall height is the more damaging of the two: }
+{ a footprint claiming 50mm when the part is 3mm fails placement-collision    }
+{ DRC against everything near it and blocks placements that are actually fine, }
+{ where a too-low height merely fails to catch a real collision.              }
+{                                                                              }
+{ NEITHER MODE WRITES ZERO. A footprint with no 3D body yields no measurement, }
+{ and writing the 0 that implies would silently disable the very DRC rule this }
+{ handler exists to arm, across every part a library never modelled. Those are }
+{ counted and named as without_model instead, which is a finding worth having. }
 Function Lib_UpdateFootprintHeightsFrom3D(Params : String; RequestId : String) : String;
 Var
     CurLib : IPCB_Library;
@@ -6329,11 +6340,20 @@ Var
     Footprint, SavedCurrent : IPCB_LibComponent;
     GrIter : IPCB_GroupIterator;
     Body : IPCB_ComponentBody;
-    Updated, Inspected : Integer;
-    Items, FpName : String;
-    First : Boolean;
+    Updated, Inspected, Lowered, NoModel : Integer;
+    Items, FpName, Mode, NoModelNames : String;
+    First, FirstNoModel, ShouldWrite : Boolean;
     OldH, NewH : TCoord;
 Begin
+    Mode := LowerCase(Trim(ExtractJsonValue(Params, 'mode')));
+    If Mode = '' Then Mode := 'raise';
+    If (Mode <> 'raise') And (Mode <> 'match') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_MODE',
+            'mode must be "raise" (only increase a height, the default) or '
+            + '"match" (also lower a height to the model). Got: ' + Mode);
+        Exit;
+    End;
     CurLib := PCBServer.GetCurrentPCBLibrary;
     If CurLib = Nil Then
     Begin
@@ -6345,8 +6365,12 @@ Begin
     SavedCurrent := CurLib.CurrentComponent;
     Updated := 0;
     Inspected := 0;
+    Lowered := 0;
+    NoModel := 0;
     Items := '';
+    NoModelNames := '';
     First := True;
+    FirstNoModel := True;
 
     LibIter := CurLib.LibraryIterator_Create;
     Try
@@ -6373,19 +6397,35 @@ Begin
                 End;
 
                 OldH := Footprint.Height;
-                If (NewH > 0) And (NewH > OldH) Then
+                FpName := '';
+                Try FpName := Footprint.Name; Except End;
+
+                If NewH <= 0 Then
                 Begin
-                    Footprint.Height := NewH;
-                    Inc(Updated);
-                    FpName := '';
-                    Try FpName := Footprint.Name; Except End;
-                    If Not First Then Items := Items + ',';
-                    First := False;
-                    Items := Items + JsonObj(
-                        JsonStr('name', FpName) + ',' +
-                        JsonFloat('old_height_mm', CoordToMM(OldH)) + ',' +
-                        JsonFloat('new_height_mm', CoordToMM(NewH))
-                    );
+                    { No 3D body, so nothing measured. Never written to 0. }
+                    Inc(NoModel);
+                    If Not FirstNoModel Then NoModelNames := NoModelNames + ',';
+                    FirstNoModel := False;
+                    NoModelNames := NoModelNames + '"'
+                        + EscapeJsonString(FpName) + '"';
+                End
+                Else
+                Begin
+                    If Mode = 'match' Then ShouldWrite := (NewH <> OldH)
+                    Else ShouldWrite := (NewH > OldH);
+                    If ShouldWrite Then
+                    Begin
+                        Footprint.Height := NewH;
+                        Inc(Updated);
+                        If NewH < OldH Then Inc(Lowered);
+                        If Not First Then Items := Items + ',';
+                        First := False;
+                        Items := Items + JsonObj(
+                            JsonStr('name', FpName) + ',' +
+                            JsonFloat('old_height_mm', CoordToMM(OldH)) + ',' +
+                            JsonFloat('new_height_mm', CoordToMM(NewH))
+                        );
+                    End;
                 End;
             Except End;
             Footprint := LibIter.NextPCBObject;
@@ -6407,9 +6447,140 @@ Begin
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
+            JsonStr('mode', Mode) + ',' +
             JsonInt('inspected', Inspected) + ',' +
             JsonInt('updated', Updated) + ',' +
+            JsonInt('lowered', Lowered) + ',' +
+            JsonInt('without_model', NoModel) + ',' +
+            JsonRaw('without_model_names', '[' + NoModelNames + ']') + ',' +
+            JsonStr('without_model_note',
+                'These have no 3D body, so no height could be measured and '
+                + 'none was written. Their Height is whatever it already was, '
+                + 'and a 0 there leaves placement-collision DRC disabled for '
+                + 'that part.') + ',' +
             JsonRaw('items', '[' + Items + ']')
+        ));
+End;
+
+
+{..............................................................................}
+{ Lib_SetFootprintHeight                                                       }
+{                                                                              }
+{ Write Footprint.Height directly, up or down, on one named footprint or on    }
+{ the library's current component.                                             }
+{                                                                              }
+{ The sweep above can only derive a height from a 3D body, which leaves two    }
+{ cases it cannot serve: a part with no model, and a part whose model is       }
+{ wrong. Before this there was no setter at all, so a footprint carrying an    }
+{ absurd height could be read but not corrected from here.                     }
+{                                                                              }
+{ Zero is ACCEPTED but is not a neutral value: it disables the                 }
+{ placement-collision rule for that footprint rather than relaxing it. The     }
+{ reply says so when it is written, because "cleared the height" and "turned   }
+{ off the check" are the same edit and only one of them sounds harmless.       }
+{..............................................................................}
+
+Function Lib_SetFootprintHeight(Params : String; RequestId : String) : String;
+Var
+    CurLib : IPCB_Library;
+    LibIter : IPCB_LibraryIterator;
+    Footprint, Target, SavedCurrent : IPCB_LibComponent;
+    FpWanted, HeightStr, FpName, Note : String;
+    HeightMM : Double;
+    OldH, NewH : TCoord;
+Begin
+    FpWanted := Trim(ExtractJsonValue(Params, 'footprint_name'));
+    HeightStr := Trim(ExtractJsonValue(Params, 'height_mm'));
+
+    If HeightStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'height_mm is required');
+        Exit;
+    End;
+
+    { StrToFloatDef, not StrToFloat in a Try. A raising conversion here
+      halts on break-on-exception in the Script IDE even though the
+      handler would have swallowed it, which is how a bad parameter
+      turns into a stopped debugger. The sentinel doubles as the
+      rejection for a negative value. }
+    HeightMM := StrToFloatDef(HeightStr, -1);
+    If HeightMM < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'BAD_HEIGHT',
+            'height_mm must be a non-negative number in millimetres. Got: '
+            + HeightStr);
+        Exit;
+    End;
+
+    CurLib := PCBServer.GetCurrentPCBLibrary;
+    If CurLib = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCBLIB',
+            'No PCB Library document focused');
+        Exit;
+    End;
+
+    SavedCurrent := CurLib.CurrentComponent;
+    Target := Nil;
+
+    If FpWanted = '' Then Target := SavedCurrent
+    Else
+    Begin
+        LibIter := CurLib.LibraryIterator_Create;
+        Try
+            LibIter.SetState_FilterAll;
+            Footprint := LibIter.FirstPCBObject;
+            While Footprint <> Nil Do
+            Begin
+                FpName := '';
+                Try FpName := Footprint.Name; Except End;
+                If UpperCase(FpName) = UpperCase(FpWanted) Then
+                Begin
+                    Target := Footprint;
+                    Break;
+                End;
+                Footprint := LibIter.NextPCBObject;
+            End;
+        Finally
+            CurLib.LibraryIterator_Destroy(LibIter);
+        End;
+    End;
+
+    If Target = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FOOTPRINT_NOT_FOUND',
+            'No footprint named ' + FpWanted + ' in the focused library. '
+            + 'Call lib_get_footprints to see what it holds.');
+        Exit;
+    End;
+
+    FpName := '';
+    Try FpName := Target.Name; Except End;
+    OldH := Target.Height;
+    NewH := MMToCoord(HeightMM);
+    Target.Height := NewH;
+
+    If SavedCurrent <> Nil Then CurLib.CurrentComponent := SavedCurrent;
+    Try CurLib.Board.ViewManager_FullUpdate; Except End;
+
+    Note := '';
+    If NewH = 0 Then
+        Note := 'A height of 0 disables the placement-collision rule for '
+              + 'this footprint rather than relaxing it, so nothing will be '
+              + 'flagged against it however tall the real part is.';
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonStr('name', FpName) + ',' +
+            JsonFloat('old_height_mm', CoordToMM(OldH)) + ',' +
+            JsonFloat('new_height_mm', CoordToMM(NewH)) + ',' +
+            JsonBool('changed', OldH <> NewH) + ',' +
+            JsonBool('saved', False) + ',' +
+            JsonStr('save_note',
+                'The library is modified in memory and NOT saved. Review the '
+                + 'change, then save it in Altium.') + ',' +
+            JsonStr('note', Note)
         ));
 End;
 
@@ -9526,6 +9697,7 @@ Begin
         'set_label_formats':  Result := Lib_SetLabelFormats(Params, RequestId);
         'set_current_component': Result := Lib_SetCurrentComponent(Params, RequestId);
         'update_footprint_heights_from_3d': Result := Lib_UpdateFootprintHeightsFrom3D(Params, RequestId);
+        'set_footprint_height': Result := Lib_SetFootprintHeight(Params, RequestId);
         'split_pin_functions':  Result := Lib_SplitPinFunctions(Params, RequestId);
         'install_library':      Result := Lib_InstallLibrary(Params, RequestId);
         'uninstall_library':    Result := Lib_UninstallLibrary(Params, RequestId);
