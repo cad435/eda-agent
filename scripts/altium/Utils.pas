@@ -740,6 +740,37 @@ Begin
     Else If TypeStr = 'eDimensionObject' Then Result := eDimensionObject;
 End;
 
+{ Inverse of ObjectTypeFromStringPCB. Written here, next to it, so the
+  two cannot disagree about what a type is called.
+
+  It exists because PCB.pas called ObjectIDToObjectName, which no Altium
+  version declares. DelphiScript compiles a function only when it is
+  first CALLED, so the fault stayed hidden from May until a DRC
+  violation report finally reached that line, and it halted the polling
+  loop: an undeclared identifier is not catchable, and the Try/Except
+  wrapped around the call did nothing.
+
+  The name looked safe because it appears in reference/, but the only
+  file there using it is a vendored copy of this project's own PCB.pas.
+  The independent scripts define their own ObjectIDToString by hand,
+  which is the tell that no builtin exists. }
+
+Function ObjectIDToObjectName(Id : Integer) : String;
+Begin
+    If Id = eTrackObject             Then Result := 'track'
+    Else If Id = ePadObject          Then Result := 'pad'
+    Else If Id = eViaObject          Then Result := 'via'
+    Else If Id = eComponentObject    Then Result := 'component'
+    Else If Id = eArcObject          Then Result := 'arc'
+    Else If Id = eFillObject         Then Result := 'fill'
+    Else If Id = eTextObject         Then Result := 'text'
+    Else If Id = ePolyObject         Then Result := 'polygon'
+    Else If Id = eRegionObject       Then Result := 'region'
+    Else If Id = eRuleObject         Then Result := 'rule'
+    Else If Id = eDimensionObject    Then Result := 'dimension'
+    Else Result := 'objectid_' + IntToStr(Id);
+End;
+
 Function MechKindToString(K : Integer) : String;
 Begin
     Case K Of
