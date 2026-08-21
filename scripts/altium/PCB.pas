@@ -744,8 +744,10 @@ Var
     RuleHoleIter : IPCB_MaxMinHoleSizeConstraint;
     RuleName, V, GapStr, MinWStr, MaxWStr, FavWStr, MinHStr, MaxHStr : String;
     UpdatedCount, Kind, ValMils : Integer;
+    GapWanted, GapBefore, GapAfter : TCoord;
+    GapReport, GapMMStr : String;
     L : TLayer;
-    Found : Boolean;
+    Found, GapVerified, GapKindSupported : Boolean;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -754,6 +756,10 @@ Begin
         Exit;
     End;
 
+    GapVerified := False;
+    GapKindSupported := False;
+    GapBefore := -1;
+    GapAfter := -1;
     RuleName := ExtractJsonValue(Params, 'name');
     If RuleName = '' Then
     Begin
@@ -815,14 +821,38 @@ Begin
     { matches by name + kind, applies the write, breaks out. See the         }
     { ModifyWidthRules.pas reference pattern.                                  }
     GapStr := ExtractJsonValue(Params, 'gap_mils');
+    GapMMStr := ExtractJsonValue(Params, 'gap_mm');
     MinWStr := ExtractJsonValue(Params, 'min_width_mils');
     MaxWStr := ExtractJsonValue(Params, 'max_width_mils');
     FavWStr := ExtractJsonValue(Params, 'favored_width_mils');
     MinHStr := ExtractJsonValue(Params, 'min_hole_size_mils');
     MaxHStr := ExtractJsonValue(Params, 'max_hole_size_mils');
 
-    If (GapStr <> '') And
-       ((Kind = eRule_Clearance) Or (Kind = 24) Or (Kind = 52)) Then
+    { 63 is BoardOutlineClearance, added because a board-clearance rule
+      was reachable as an object and unwritable through every exposed
+      path, leaving no way to set it at all. The ordinal comes from the
+      TRuleKind order in the ReturnViaCheck reference script, where
+      position 52 lands on HoleToHoleClearance and so agrees with the
+      value this handler already determined empirically.
+
+      LITERALS, NOT THE eRule_ NAMES, and deliberately so. The published
+      enum stops at 51, which is why 24 and 52 were written as numbers
+      here in the first place, and eRule_HoleToHoleClearance and
+      eRule_BoardOutlineClearance appear nowhere in shipped code. An
+      identifier DelphiScript does not know faults at runtime where
+      Try/Except cannot catch it and takes the polling loop with it, so
+      a name that merely reads better is not worth that.
+        24 = ComponentClearance, 52 = HoleToHoleClearance,
+        63 = BoardOutlineClearance
+
+      Whether 63 answers IPCB_ClearanceConstraint.Gap is NOT established:
+      no IPCB_BoardOutlineClearanceConstraint exists in the reference
+      corpus, and the old note generalised "kinds 52+ share the
+      interface" from a single measurement. So the write below is checked
+      by reading the value back rather than assumed. }
+    GapKindSupported := (Kind = eRule_Clearance) Or (Kind = 24)
+        Or (Kind = 52) Or (Kind = 63);
+    If ((GapStr <> '') Or (GapMMStr <> '')) And GapKindSupported Then
     Begin
         Iter := Board.BoardIterator_Create;
         Iter.AddFilter_ObjectSet(MkSet(eRuleObject));
@@ -835,10 +865,27 @@ Begin
             Begin
                 If RuleClearIter.Name = RuleName Then
                 Begin
-                    Try
-                        RuleClearIter.Gap := MilsToCoord(StrToIntDef(GapStr, 0));
-                        Inc(UpdatedCount);
-                    Except End;
+                    { Write, then READ IT BACK. A rule kind that does not
+                      really carry Gap does not necessarily raise: it can
+                      accept the assignment and keep its old value, and
+                      counting that as updated is how a caller ends up
+                      told the constraint was set while the board still
+                      has the old number. Measured on a board-clearance
+                      rule: the write reported success and the Gap stayed
+                      at 0. Only a confirmed change is counted. }
+                    { gap_mm is exact where gap_mils is not: an
+                      integer-mil field cannot express 0.2mm, which
+                      lands on 8 mils and 0.2032mm. }
+                    If GapMMStr <> '' Then
+                        GapWanted := MMToCoord(StrToFloatDef(GapMMStr, 0))
+                    Else GapWanted := MilsToCoord(StrToIntDef(GapStr, 0));
+                    GapBefore := -1;
+                    GapAfter := -1;
+                    Try GapBefore := RuleClearIter.Gap; Except End;
+                    Try RuleClearIter.Gap := GapWanted; Except End;
+                    Try GapAfter := RuleClearIter.Gap; Except End;
+                    GapVerified := (GapAfter = GapWanted);
+                    If GapVerified Then Inc(UpdatedCount);
                     Found := True;
                 End;
                 If Not Found Then RuleClearIter := Iter.NextPCBObject;
@@ -933,10 +980,47 @@ Begin
 
     SaveDocByPath(Board.FileName);
 
+    { When a gap was asked for, say what became of it. A bare count is
+      what let a refused constraint write read as a success: the number
+      was 1 because an unrelated comment write had landed. }
+    GapReport := '';
+    If (GapStr <> '') Or (GapMMStr <> '') Then
+    Begin
+        If GapMMStr <> '' Then
+            GapReport := ',"gap_requested_mm":' + GapMMStr
+        Else GapReport := ',"gap_requested_mils":' + GapStr;
+        GapReport := GapReport
+            + ',"gap_after_mm":' + FloatToStr(CoordToMM(GapAfter))
+            + ',"gap_written":' + BoolToJsonStr(GapVerified);
+        If GapBefore >= 0 Then
+            GapReport := GapReport + ',"gap_before_mils":'
+                + IntToStr(CoordToMils(GapBefore));
+        If GapAfter >= 0 Then
+            GapReport := GapReport + ',"gap_after_mils":'
+                + IntToStr(CoordToMils(GapAfter));
+        If Not GapKindSupported Then
+            GapReport := GapReport + ',"gap_note":"'
+                + 'This handler does not write a gap for rule kind '
+                + IntToStr(Kind) + '. It was SKIPPED, not attempted, and the '
+                + 'rule is unchanged. Gap is dispatched for kinds 0 '
+                + '(Clearance), 24 (ComponentClearance), 52 '
+                + '(HoleToHoleClearance) and 63 (BoardOutlineClearance). '
+                + 'Everything else needs PCB > Rules and Constraints Editor. '
+                + 'Report the kind number if it should be here."'
+        Else If Not GapVerified Then
+            GapReport := GapReport + ',"gap_note":"'
+                + 'The gap was attempted and did NOT take: the rule still '
+                + 'holds its old value. Read back rather than assumed, '
+                + 'because a kind that does not really carry Gap on '
+                + 'IPCB_ClearanceConstraint accepts the assignment silently. '
+                + 'Set it in PCB > Rules and Constraints Editor."';
+    End;
+
     Result := BuildSuccessResponse(RequestId,
         '{"name":"' + EscapeJsonString(Rule.Name) + '",'
         + '"rule_kind":' + IntToStr(Kind) + ','
-        + '"properties_updated":' + IntToStr(UpdatedCount) + '}');
+        + '"properties_updated":' + IntToStr(UpdatedCount)
+        + GapReport + '}');
 End;
 
 {..............................................................................}

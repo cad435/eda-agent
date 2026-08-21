@@ -1224,6 +1224,7 @@ End;
 Function Gen_QueryObjects(Params : String; RequestId : String) : String;
 Var
     Scope, ObjTypeStr, FilterStr, PropsStr, ScopeType, ScopePath : String;
+    BadProps : String;
     ObjTypeInt, Limit : Integer;
 Begin
     Scope := ExtractJsonValue(Params, 'scope');
@@ -1256,6 +1257,22 @@ Begin
     ObjTypeInt := ObjectTypeFromStringPCB(ObjTypeStr);
     If ObjTypeInt <> -1 Then
     Begin
+        { REFUSE a property name the PCB getter has no branch for. It
+          used to return '' for those, which is the same value a real
+          but empty property gives, so a misspelling read as "the data
+          is not there". Measured three times, each ending in a report
+          that the bridge could not do something it could: the worst was
+          'Net.Name', where every track came back with no net and the
+          conclusion was that copper carries no net attribution at all. }
+        BadProps := UnknownPCBProperties(PropsStr);
+        If BadProps <> '' Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'UNKNOWN_PROPERTY',
+                'Not a PCB property: ' + BadProps + '. These primitives do '
+                + 'not use the dotted schematic spelling, so Net.Name is '
+                + 'Net here. Available: ' + KnownPCBPropertyList + '.');
+            Exit;
+        End;
         Result := ProcessActivePCBDoc(ObjTypeInt, FilterStr, PropsStr, '', 'query', RequestId, Limit);
         Exit;
     End;

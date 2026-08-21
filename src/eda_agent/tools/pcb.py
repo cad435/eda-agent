@@ -5325,11 +5325,23 @@ def register_pcb_tools(mcp):
             "Hole Size Constraint (Min=0.1mm) (Max=4mm) (All)"
             "Routing Via (Templates Used To Check Via: v30h10m0mx0, ...) (All)"
 
-        Constraint values live on per-kind subtype interfaces
-        (IPCB_ClearanceConstraint, IPCB_MaxMinWidthConstraint, ...) which
-        cannot be safely accessed from a base IPCB_Rule reference in
-        DelphiScript, so we surface the descriptor string instead. Parse
-        it client-side if you need numeric values.
+        WHY THE DESCRIPTOR AND NOT THE NUMBERS. Constraint values live on
+        per-kind subtype interfaces (IPCB_ClearanceConstraint,
+        IPCB_MaxMinWidthConstraint, ...). This handler holds a base
+        IPCB_Rule, where those members do not exist, so reading them
+        gives nothing and the descriptor is what is offered instead.
+        Parse it client-side if you need numeric values.
+
+        THAT IS A LIMIT OF THIS READ, NOT OF THE API, and the difference
+        matters because the sentence above has already been read as
+        "constraints are unreachable" and stopped someone who then
+        reported a rule as unwritable. DelphiScript DOES narrow an
+        interface, but only at iterator return, so a typed local
+        assigned straight from ``BoardIterator.FirstPCBObject`` reaches
+        the constraint members. ``pcb_set_rule_properties`` writes them
+        that way. To CHANGE a value, use that tool. ``obj_modify`` will
+        not do it: it dispatches through the base reference and reports
+        a match while changing nothing.
 
         Args:
             name: Design rule name (e.g., "Clearance", "Width", "RoutingVias").
@@ -5350,6 +5362,7 @@ def register_pcb_tools(mcp):
         scope2: str | None = None,
         comment: str | None = None,
         gap_mils: int | None = None,
+        gap_mm: float | None = None,
         min_width_mils: int | None = None,
         max_width_mils: int | None = None,
         favored_width_mils: int | None = None,
@@ -5361,16 +5374,28 @@ def register_pcb_tools(mcp):
         Metadata fields always apply. Constraint fields are dispatched
         by the rule's underlying RuleKind:
 
-        - Clearance (kind 0), ComponentClearance (kind 24), and
-          HoleToHoleClearance (kind 52): ``gap_mils``. All three share
-          the Gap property on IPCB_ClearanceConstraint.
+        - Clearance (kind 0), ComponentClearance (kind 24),
+          HoleToHoleClearance (kind 52) and BoardOutlineClearance
+          (kind 63): ``gap_mils``, or ``gap_mm`` when the value is
+          metric. An integer mil field cannot express 0.2mm; it lands
+          on 8 mils, which is 0.2032mm. Pass one or the other.
         - Width (kind 2): ``min_width_mils`` / ``max_width_mils`` /
           ``favored_width_mils`` (applied to every layer).
         - HoleSize (kind 42): ``min_hole_size_mils`` / ``max_hole_size_mils``.
 
+        THE GAP WRITE IS READ BACK, not assumed. A rule kind that does
+        not really carry Gap can accept the assignment and keep its old
+        value, so the reply carries ``gap_written``, ``gap_after_mm``
+        and, when it did not take, a note saying the rule still holds
+        the old number. Kind 63 in particular is included on the
+        strength of its position in the TRuleKind order rather than a
+        documented interface, so let ``gap_written`` decide whether it
+        worked rather than the count.
+
         Pass only the parameters you want to change; everything else
-        stays untouched. Each successful field write increments
-        ``properties_updated`` in the response.
+        stays untouched. Each VERIFIED field write increments
+        ``properties_updated`` in the response, so a refused constraint
+        no longer inflates it.
 
         NOTE: Priority is NOT writable from this tool. ``IPCB_Rule.Priority``
         is a read-only function in the PCB scripting API
@@ -5401,6 +5426,7 @@ def register_pcb_tools(mcp):
             ("scope2", scope2),
             ("comment", comment),
             ("gap_mils", gap_mils),
+            ("gap_mm", gap_mm),
             ("min_width_mils", min_width_mils),
             ("max_width_mils", max_width_mils),
             ("favored_width_mils", favored_width_mils),

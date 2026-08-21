@@ -33,7 +33,14 @@ Begin
         Else If PropName = 'Layer'      Then Result := GetLayerString(Obj.Layer)
         Else If PropName = 'Descriptor' Then Result := Obj.Descriptor
         Else If PropName = 'Selected'   Then Result := BoolToJsonStr(Obj.Selected)
-        Else If PropName = 'Net'        Then
+        { 'Net.Name' is accepted as well as 'Net'. Designator.Text and
+          Comment.Text are already accepted alongside their bare forms,
+          so a caller who used one of those infers a dotted rule that
+          held twice and failed here, silently, returning empty as
+          though the copper had no net. Measured: a session concluded
+          the bridge could not attribute copper to a net at all and
+          stopped, when the property was simply spelled differently. }
+        Else If (PropName = 'Net') Or (PropName = 'Net.Name') Then
         Begin
             If Obj.Net <> Nil Then Result := Obj.Net.Name;
         End
@@ -232,6 +239,73 @@ Begin
         Actual := GetPCBProperty(Obj, PropName);
         If Actual <> Expected Then Begin Result := False; Exit; End;
     End;
+End;
+
+{..............................................................................}
+{ IsKnownPCBProperty                                                           }
+{                                                                              }
+{ Whether GetPCBProperty has a branch for this name. It exists because that    }
+{ getter returns '' for anything it does not recognise, which makes a          }
+{ MISSPELLED property indistinguishable from one that is genuinely empty. That }
+{ ambiguity has now cost three separate investigations, each concluding the    }
+{ bridge could not do something it could: the caller sees blanks, believes the }
+{ data is not there, and stops.                                                }
+{                                                                              }
+{ Kept next to the getter deliberately. A list that lives somewhere else       }
+{ drifts the first time a branch is added, and a stale allow-list would reject }
+{ a property that works, which is worse than the silence it replaces.          }
+{..............................................................................}
+
+Function IsKnownPCBProperty(PropName : String) : Boolean;
+Begin
+    Result :=
+        (PropName = 'ObjectId') Or (PropName = 'X') Or (PropName = 'Y') Or
+        (PropName = 'Layer') Or (PropName = 'Descriptor') Or
+        (PropName = 'Selected') Or (PropName = 'Net') Or
+        (PropName = 'Net.Name') Or (PropName = 'X1') Or (PropName = 'Y1') Or
+        (PropName = 'X2') Or (PropName = 'Y2') Or (PropName = 'Width') Or
+        (PropName = 'Radius') Or (PropName = 'StartAngle') Or
+        (PropName = 'EndAngle') Or (PropName = 'XCenter') Or
+        (PropName = 'YCenter') Or (PropName = 'HoleSize') Or
+        (PropName = 'Size') Or (PropName = 'TopShape') Or
+        (PropName = 'TopXSize') Or (PropName = 'TopYSize') Or
+        (PropName = 'Rotation') Or (PropName = 'Name') Or
+        (PropName = 'Text') Or (PropName = 'Pattern') Or
+        (PropName = 'Designator') Or (PropName = 'Designator.Text') Or
+        (PropName = 'Comment') Or (PropName = 'Comment.Text') Or
+        (PropName = 'SourceDesignator');
+End;
+
+Function UnknownPCBProperties(PropsStr : String) : String;
+Var
+    Remaining, PropName : String;
+    CommaPos : Integer;
+Begin
+    Result := '';
+    Remaining := PropsStr;
+    While Remaining <> '' Do
+    Begin
+        CommaPos := Pos(',', Remaining);
+        If CommaPos > 0 Then
+        Begin
+            PropName := Trim(Copy(Remaining, 1, CommaPos - 1));
+            Remaining := Copy(Remaining, CommaPos + 1, Length(Remaining));
+        End
+        Else Begin PropName := Trim(Remaining); Remaining := ''; End;
+        If (PropName <> '') And (Not IsKnownPCBProperty(PropName)) Then
+        Begin
+            If Result <> '' Then Result := Result + ', ';
+            Result := Result + PropName;
+        End;
+    End;
+End;
+
+Function KnownPCBPropertyList : String;
+Begin
+    Result := 'ObjectId, X, Y, Layer, Descriptor, Selected, Net, X1, Y1, '
+        + 'X2, Y2, Width, Radius, StartAngle, EndAngle, XCenter, YCenter, '
+        + 'HoleSize, Size, TopShape, TopXSize, TopYSize, Rotation, Name, '
+        + 'Text, Pattern, Designator, Comment, SourceDesignator';
 End;
 
 Function BuildObjectJsonPCB(Obj : IPCB_Primitive; PropsStr : String) : String;
