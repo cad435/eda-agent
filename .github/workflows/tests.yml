@@ -38,6 +38,29 @@ jobs:
       - name: Install Free Pascal Compiler
         run: choco install freepascal --no-progress -y
 
+      # CHOCO DOES NOT PUT FPC ON THE PATH THAT LATER STEPS SEE. It
+      # deploys to C:\tools\freepascal and updates the machine PATH, but
+      # the runner captured the environment when the job began, so every
+      # following step still looks at the old one.
+      #
+      # This is why the cross-validation had never run. `choco install`
+      # reported success, the tests found no fpc, skipped themselves,
+      # and a skip is green. Measured on the run before this one: 138
+      # skipped, and these 37 were among them.
+      #
+      # The bin directory is found rather than hardcoded, since it
+      # carries the target triple (bin\i386-win32) and would move with a
+      # compiler version.
+      - name: Put fpc on PATH
+        run: |
+          $fpc = Get-ChildItem -Path 'C:\tools\freepascal' -Filter fpc.exe -Recurse -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $fpc) {
+            Write-Error "fpc.exe not found under C:\tools\freepascal after a successful install"
+            exit 1
+          }
+          Add-Content -Path $env:GITHUB_PATH -Value $fpc.Directory.FullName
+
       # WITHOUT THIS, SPEEDING THIS JOB UP IS INDISTINGUISHABLE FROM
       # DELETING IT. The cross-validation tests skip themselves when fpc
       # is not on PATH, and a skip is green. So any change that breaks
