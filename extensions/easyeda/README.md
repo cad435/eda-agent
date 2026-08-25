@@ -44,6 +44,16 @@ over the socket, and is therefore readable exactly when a connection
 already works. The question anybody actually asks is the opposite one,
 and it has to be answerable with no socket at all.
 
+It then asks the server and reports that separately, because **module
+state can only describe the copy you are asking**. Importing a new
+build mid session loads a second copy of the module, and the editor
+fires `onStartupFinished` only at startup, so the new copy never
+activates while the older one keeps the socket and answers every
+command. Measured: a status item reporting "NOT connected, attempts 0,
+retry timer NOT ARMED" on an editor the server showed as connected.
+Both were true. `/health` therefore lists the builds actually holding
+sockets, and the status item says whether this build is one of them.
+
 A failed scan now also toasts, at most once a minute, so a server that
 is not running says so instead of nothing happening.
 

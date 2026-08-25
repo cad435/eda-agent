@@ -4490,6 +4490,22 @@ function noteOutcome(text) {
 // It states the build too, because a re-import at a version already
 // installed is a silent no-op, so "the fix is not working" and "the fix
 // is not installed" look the same from here.
+// MODULE STATE ALONE IS NOT ENOUGH, and the first version of this that
+// shipped proved it. It reported "NOT connected, attempts 0, retry
+// timer NOT ARMED" while the server showed the editor connected, and
+// both were accurate.
+//
+// A mid-session re-import loads a SECOND copy of this module. The
+// editor fires onStartupFinished only at startup, so the new copy never
+// runs activate(), yet it is the copy wired to the freshly imported
+// menu. The older copy keeps the working socket and answers every
+// command. Asking the menu's copy how the connection is going therefore
+// asks the one that never made one.
+//
+// The server sees every copy, so the second half of this reads /health
+// and reports what IT observes, including which builds are actually
+// holding sockets. Comparing that against BUILD_ID is what distinguishes
+// "not connected" from "connected, but not by this copy of the code".
 export function status() {
   const age =
     lastOutcomeAt === 0
@@ -4497,13 +4513,74 @@ export function status() {
       : `${Math.round((Date.now() - lastOutcomeAt) / 1000)}s ago`;
   const lines = [
     `eda-agent ${BUILD_ID}`,
-    connected ? 'believes it is CONNECTED' : 'NOT connected',
+    connected ? 'this copy believes it is CONNECTED' : 'this copy: NOT connected',
     `last scan: ${lastOutcome} (${age})`,
     `attempts ${attachAttempts}, sockets opened ${wsSerial}`,
     `retry timer: ${retryTimer ? 'armed' : 'NOT ARMED'}`,
   ];
+  if (attachAttempts === 0 && retryTimer === null) {
+    lines.push(
+      'This copy never started. It was imported mid session, so',
+      'another loaded copy probably holds the socket. Asking the server.',
+    );
+  }
   toast(lines.join('\n'));
+
+  // Asked second and reported separately, so the local answer appears
+  // at once even on a runtime with no fetch and no server to ask.
+  askServer().then((seen) => {
+    if (!seen) {
+      toast(
+        hasFetch()
+          ? `eda-agent: no server answered on ${PORT_START}-${PORT_END}`
+          : 'eda-agent: this runtime has no fetch, so the server cannot be asked',
+      );
+      return;
+    }
+    const builds = seen.editor_builds || [];
+    const mine = builds.indexOf(BUILD_ID) !== -1;
+    toast(
+      [
+        `server on ${seen.port}: editor ${seen.editor_connected ? 'CONNECTED' : 'not connected'}`,
+        builds.length
+          ? `builds holding sockets: ${builds.join(', ')}`
+          : 'no build has identified itself yet',
+        mine
+          ? 'one of them is this build'
+          : `this build (${BUILD_ID}) is NOT one of them`,
+      ].join('\n'),
+    );
+  });
+
   return lines.join('\n');
+}
+
+// What the server says, from whichever port answers first.
+async function askServer() {
+  if (!hasFetch()) return null;
+  for (const port of candidatePorts()) {
+    try {
+      const response = await Promise.race([
+        fetch(`http://127.0.0.1:${port}/health`, { method: 'GET' }),
+        delay(PROBE_MS * 4).then(() => null),
+      ]);
+      if (!response || !response.ok) continue;
+      const body = await Promise.race([
+        response.json(),
+        delay(PROBE_MS * 4).then(() => null),
+      ]);
+      if (body && body.service === SERVICE_ID) {
+        return {
+          port,
+          editor_connected: body.editor_connected,
+          editor_builds: body.editor_builds,
+        };
+      }
+    } catch (e) {
+      // Nothing there. Expected for most of the range.
+    }
+  }
+  return null;
 }
 
 export function connect() {
