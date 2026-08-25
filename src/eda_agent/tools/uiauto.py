@@ -496,10 +496,41 @@ def register_uiauto_tools(mcp):
 
             button = target.find_button(button_caption)
             if button is None:
+                offered = [b.text for b in target.buttons()]
+                if not offered:
+                    # NO BUTTON HANDLES AT ALL: a WPF dialog. Its buttons
+                    # are not child windows, so there is nothing to click
+                    # and nothing to list. MEASURED on "Unsaved Changes":
+                    # this branch used to refuse and leave the bridge
+                    # blocked, while a plain Enter cleared it instantly.
+                    #
+                    # Only the two keys that map to a dialog's own
+                    # defaults are offered, and the caption still decides
+                    # which, so "Cancel" cannot silently become a save.
+                    role = dialog_driver.role_of(button_caption)
+                    key = "escape" if role == "dismiss" else "enter"
+                    if role in dialog_driver.COMMITTING \
+                            and not allow_irreversible:
+                        return {"ok": False, "role": role, "reason": (
+                            f"{button_caption!r} commits a change. Pass "
+                            f"allow_irreversible=True if that is intended.")}
+                    windows.press_key(target.hwnd, key)
+                    shut = windows.wait_for_close(target.hwnd, timeout=5.0)
+                    return {
+                        "ok": shut, "dialog": target.title,
+                        "pressed": button_caption, "method": "keyboard",
+                        "key": key, "dialog_closed": shut,
+                        "reason": None if shut else (
+                            f"sent {key} because {target.title!r} exposes no "
+                            f"button handles, and the dialog is still open. "
+                            f"Its captions are only readable by OCR, so the "
+                            f"key is a guess at the default action rather "
+                            f"than a press of the named button."),
+                    }
                 return {"ok": False,
                         "reason": (f"{button_caption!r} is not a button on "
                                    f"{target.title!r}"),
-                        "offered": [b.text for b in target.buttons()]}
+                        "offered": offered}
             if not button.enabled:
                 return {"ok": False, "reason": (
                     f"{button.text!r} is disabled, so the dialog is not in "

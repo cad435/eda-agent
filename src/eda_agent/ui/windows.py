@@ -495,6 +495,51 @@ def close_window(hwnd: int) -> None:
     win32gui.PostMessage(hwnd, win32con.WM_CLOSE, 0, 0)
 
 
+#: Keys that answer a dialog with no addressable buttons.
+_KEYS = {"enter": 0x0D, "escape": 0x1B}
+
+
+def press_key(hwnd: int, key: str) -> bool:
+    """Answer a dialog by keystroke, for the ones with NO button handles.
+
+    THE CASE THIS EXISTS FOR. Altium's newer dialogs are WPF, hosted in
+    an HwndWrapper window. Their buttons are not child windows, so
+    EnumChildWindows returns nothing, ``buttons()`` comes back empty and
+    ``click`` has no handle to address. MEASURED on the "Unsaved
+    Changes" prompt: the captions are readable only by OCR, and
+    app_press_dialog_button could do nothing but refuse while the bridge
+    stayed blocked for over two minutes.
+
+    A keystroke reaches it, because the dialog has keyboard focus while
+    it is modal. Enter takes the default button and Escape cancels,
+    which between them cover the confirm prompts that actually wedge
+    this bridge.
+
+    Unlike ``click`` this CANNOT be addressed to a specific control, so
+    it goes to the foreground window and the caller must have made the
+    dialog foreground first. That is the trade: it is less precise, and
+    it is the only thing that works when no handle exists.
+
+    Returns whether the key was sent, not whether the dialog obeyed.
+    Confirm with ``wait_for_close``.
+    """
+    _require()
+    code = _KEYS.get(key.lower())
+    if code is None:
+        raise ValueError(f"unsupported key {key!r}; use one of "
+                         f"{sorted(_KEYS)}")
+    try:
+        win32gui.SetForegroundWindow(hwnd)
+    except Exception:                            # pragma: no cover - guard
+        # Windows refuses foreground changes from a background process
+        # in some states. The post below can still land if the dialog
+        # already has focus, so this is not fatal.
+        pass
+    win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN, code, 0)
+    win32gui.PostMessage(hwnd, win32con.WM_KEYUP, code, 0)
+    return True
+
+
 def window_text_dump(window: Window, limit: int = 60) -> list:
     """Readable text from a window's controls, for the record.
 

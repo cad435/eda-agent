@@ -62,6 +62,23 @@ PROTOCOL_VERSION = 2
 # passes while still catching runaway handlers.
 _MAX_HEARTBEAT_EXTENSIONS = 30
 
+#: How often to check whether a modal is what is holding a call up, and
+#: how long to wait before the first check.
+#:
+#: RECURRING, NOT ONE SHOT. A dialog does not only appear at the start: a
+#: long handler can raise one part-way through, and a single early probe
+#: would miss it and then wait out the whole timeout in silence, which is
+#: the failure this exists to remove. Checking on an interval catches it
+#: whenever it turns up.
+#:
+#: The first check is delayed so ordinary calls never pay for it. MEASURED
+#: on this workspace, the compile-bound reads are the slowest legitimate
+#: handlers and return in about a second, so a 3 second grace leaves
+#: headroom. After that the cost is one Win32 window enumeration per
+#: interval, against a call that is already stalled.
+_DIALOG_PROBE_AFTER = 3.0
+_DIALOG_PROBE_EVERY = 3.0
+
 # Thread pool for blocking I/O
 _executor = ThreadPoolExecutor(max_workers=1)
 
@@ -579,9 +596,48 @@ class AltiumBridge:
         poll_count = 0
         first_appearance: Optional[float] = None
         parse_errors = 0
+        next_dialog_probe = start + _DIALOG_PROBE_AFTER
 
         while True:
             poll_count += 1
+
+            # WATCH FOR A DIALOG THROUGHOUT, ON EVERY CALL, NOT JUST AT
+            # TIMEOUT.
+            #
+            # A modal blocks the single-threaded scripting engine, so the
+            # handler cannot answer and cannot say why. Waiting out the
+            # full timeout first turns a question a human could answer in
+            # a second into a two-minute silence, and that cost most of a
+            # working day: nine separate calls hung the whole window while
+            # the same "A command is currently active" prompt sat on
+            # screen the entire time.
+            #
+            # Checked on an interval rather than once, because a handler
+            # can raise a dialog part-way through and a single early probe
+            # would miss exactly that case.
+            #
+            # The probe is Win32 and does NOT use the bridge, which is why
+            # it works precisely when the bridge does not.
+            now = time.monotonic()
+            if first_appearance is None and now >= next_dialog_probe:
+                next_dialog_probe = now + _DIALOG_PROBE_EVERY
+                early = self._dialog_probe()
+                if early and early.get("blocked"):
+                    waited = now - start
+                    _trace_log(
+                        workspace_dir,
+                        f"POLL_DIALOG id={request_id[:8]} "
+                        f"after={waited:.1f}s "
+                        f"summary={early.get('summary', '')[:120]}",
+                    )
+                    raise AltiumTimeoutError(
+                        f"Altium is showing a modal dialog {waited:.0f}s into "
+                        f"this call, so the handler cannot run and waiting for "
+                        f"the timeout would tell you nothing more."
+                        + self._dialog_suffix(early),
+                        details={"dialogs": early,
+                                 "blocked_after_seconds": round(waited, 1)},
+                    )
             if response_path.exists():
                 if first_appearance is None:
                     first_appearance = time.monotonic() - start
@@ -688,12 +744,26 @@ class AltiumBridge:
 
         if extensions >= _MAX_HEARTBEAT_EXTENSIONS:
             self._note_fault(workspace_dir, recovery_guidance(STUCK_HANDLER))
+            # PAST TENSE, because that is all the evidence supports. This
+            # message used to say "Altium IS responding to keepalives ...
+            # likely stuck in an infinite loop", present tense, as a fixed
+            # string on this branch. It is inferred from heartbeats seen
+            # EARLIER in the wait, and nothing rechecks at timeout.
+            #
+            # MEASURED: a handler hit an uncatchable DelphiScript fault, the
+            # polling loop DIED, app_ping was already failing well before the
+            # 300s mark, and this still reported the loop as answering and
+            # pointed recovery at a stuck handler rather than a dead one.
+            # Those two call for different actions, so the wrong guess costs
+            # real time.
             raise AltiumTimeoutError(
                 f"Handler exceeded {_MAX_HEARTBEAT_EXTENSIONS} heartbeat "
                 f"extensions ({_MAX_HEARTBEAT_EXTENSIONS * timeout:.0f}s "
-                f"total); Altium is responding to keepalives but the command "
-                f"never returned. The handler is likely stuck in an infinite "
-                f"loop. " + recovery_message(STUCK_HANDLER)
+                f"total). Altium WAS answering keepalives earlier in the "
+                f"wait, but that is not rechecked here, so the loop may be "
+                f"stuck in a long operation OR may since have died. Confirm "
+                f"with app_ping before choosing a recovery. "
+                + recovery_message(STUCK_HANDLER)
                 + self._dialog_suffix(probe),
                 details={"recovery": recovery_guidance(STUCK_HANDLER),
                          "dialogs": probe},

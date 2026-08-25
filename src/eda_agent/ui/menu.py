@@ -543,6 +543,30 @@ def _list_path(pid: int, path: str, settle: float) -> dict:
 
         entries = _items_of(opened) if opened else _open_items(pid)
         items = [n for n in (_name(e) for e in entries) if n]
+
+        # A popup can be on screen and still expose no NAMED children,
+        # in which case reading only the newest one yields nothing. The
+        # merged read across every open popup is less precise, but a
+        # slightly over-broad list beats an empty one.
+        if not items:
+            items = [n for n in (_name(e) for e in _open_items(pid)) if n]
+
+        # EMPTY IS NOT A SUCCESS. This used to return ok true with
+        # items [], so a caller asking what a menu contains was told
+        # the call worked and handed nothing, with no way to tell that
+        # apart from a genuinely empty menu. MEASURED: "File" with
+        # may_steal_focus on returned ok true and no items on three
+        # consecutive calls with a PcbLib focused.
+        if not items:
+            return {"ok": False, "path": "|".join(levels), "items": [],
+                    "reason": (
+                        f"{'|'.join(levels)!r} opened but exposed no readable "
+                        f"entries. Altium builds its menus on activation and "
+                        f"the bar is per editor, so this usually means the "
+                        f"menu belongs to a different editor context than the "
+                        f"focused document, or the popup had not rendered "
+                        f"yet. Focus the matching document and retry.")}
+
         return {"ok": True, "path": "|".join(levels), "items": items}
     finally:
         # Always put the menu away. A popup left open swallows the next
