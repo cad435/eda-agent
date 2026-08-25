@@ -247,12 +247,172 @@ Begin
     If (Result <> Nil) And (Not SchLibIsAtPath(Result, LibPath)) Then Result := Nil;
 End;
 
+{ ScanLibForComponent - find a symbol by LibReference by WALKING the document. }
+{                                                                              }
+{ GetState_SchComponentByLibRef IS NOT ENOUGH ON ITS OWN. It answers from the  }
+{ library's index, and that index only knows the components the library was    }
+{ LOADED with. A symbol created in this session is invisible to it until the   }
+{ library has been saved and read back.                                        }
+{                                                                              }
+{ MEASURED on AD26 in a brand-new empty library:                               }
+{   lib_create_symbol("CLEAN_SYM")     -> succeeded, and resolved by name      }
+{                                         INSIDE the creating command          }
+{   lib_batch_set_params("CLEAN_SYM")  -> no component with that libref        }
+{   lib_link_footprint("CLEAN_SYM")    -> target component not found           }
+{ while Component_1, which came with the file, resolved throughout. So authoring}
+{ a symbol and then using it in the very next call could not work at all, and  }
+{ the tools reported it as a missing component rather than as a library that   }
+{ had not caught up.                                                           }
+{                                                                              }
+{ The walk is the same one ResolveLibComponent already used for its by-INDEX   }
+{ path, and it is the idiom in CompRename2.pas: SchLibIterator_Create with an  }
+{ eSchComponent filter, comparing LibReference byte for byte.                  }
+Function ScanLibForComponent(SchLib : ISch_Lib; Name : String) : ISch_Component;
+Var
+    Iter : ISch_Iterator;
+    LibComp : ISch_Component;
+Begin
+    Result := Nil;
+    If (SchLib = Nil) Or (Name = '') Then Exit;
+    Iter := SchLib.SchLibIterator_Create;
+    If Iter = Nil Then Exit;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        LibComp := Iter.FirstSchObject;
+        While LibComp <> Nil Do
+        Begin
+            If LibComp.LibReference = Name Then
+            Begin
+                Result := LibComp;
+                Break;
+            End;
+            LibComp := Iter.NextSchObject;
+        End;
+    Finally
+        SchLib.SchIterator_Destroy(Iter);
+    End;
+End;
+
+{ RefreshSchLibFromDisk - save the library and READ IT BACK IN.               }
+{                                                                             }
+{ A component added this session is not findable by name until the document   }
+{ has been reopened. Saving alone is NOT enough, and that is the part that    }
+{ wastes people's time, because the file on disk is demonstrably correct      }
+{ while every lookup keeps missing.                                           }
+{                                                                             }
+{ MEASURED, in this order, on AD26:                                           }
+{   lib_create_symbol("RESOLVE_TEST")   succeeded, and the name resolved      }
+{                                       INSIDE the creating command           }
+{   app_save_all                        saved:true, still_dirty:0, and the    }
+{                                       saved file contains RESOLVE_TEST      }
+{   every by-name lookup                still missed                          }
+{   CloseObject then OpenObject         the name resolves again               }
+{                                                                             }
+{ So the reopen is the step that matters and it is now part of the process    }
+{ rather than something a caller has to know. Save first: closing a dirty     }
+{ document either loses the edits or raises a prompt nothing here can answer. }
+Function RefreshSchLibFromDisk(LibPath : String) : ISch_Lib;
+Var
+    ServerDoc : IServerDocument;
+Begin
+    Result := Nil;
+    If LibPath = '' Then Exit;
+
+    { A BASENAME HERE IS WORSE THAN NOTHING. DocumentName returns one for a  }
+    { free document, and CloseObject / OpenObject given a bare name do       }
+    { nothing at all, so the reopen appeared to run and changed nothing.     }
+    { Resolve to an absolute path or give up honestly.                       }
+    LibPath := ResolveLoadedDocPath(LibPath);
+    If LibPath = '' Then Exit;
+
+    { Flush this document only. }
+    Try
+        ServerDoc := Client.GetDocumentByPath(LibPath);
+        If ServerDoc <> Nil Then
+        Begin
+            Try ServerDoc.SetModified(True); Except End;
+            Try ServerDoc.DoFileSave(''); Except End;
+        End;
+    Except End;
+
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', LibPath);
+    RunProcess('WorkspaceManager:CloseObject');
+
+    ResetParameters;
+    AddStringParameter('ObjectKind', 'Document');
+    AddStringParameter('FileName', LibPath);
+    RunProcess('WorkspaceManager:OpenObject');
+
+    Try Result := SchServer.GetCurrentSchDocument; Except End;
+End;
+
+{ LookupLibComponent - the index, then the walk, then a reopen.               }
+{                                                                             }
+{ Use this everywhere instead of calling GetState_SchComponentByLibRef.       }
+{ The third step is the one that actually finds a symbol created earlier in   }
+{ the same session, see RefreshSchLibFromDisk for what was measured.          }
+{ RefreshingLib guards against re-entering: the retry must not be able to     }
+{ trigger another reopen.                                                     }
+Function LookupLibComponent(SchLib : ISch_Lib; Name : String) : ISch_Component;
+Var
+    LibPath : String;
+    Fresh : ISch_Lib;
+Begin
+    Result := Nil;
+    If (SchLib = Nil) Or (Name = '') Then Exit;
+
+    Try Result := SchLib.GetState_SchComponentByLibRef(Name); Except End;
+    If Result <> Nil Then Exit;
+
+    Result := ScanLibForComponent(SchLib, Name);
+    If Result <> Nil Then Exit;
+
+    { THE SYMBOL CREATED EARLIER IN THIS SESSION. Neither the index nor the  }
+    { walk can see it, but the script still holds the reference it was given }
+    { when it was made, and that outlives the command because the polling    }
+    { loop does. This is the case that actually bites: author a symbol, then }
+    { set a parameter or link a footprint on it in the very next call.       }
+    {                                                                         }
+    { Checked BEFORE the reopen because it costs nothing and does not disturb }
+    { the editor, where a reopen changes focus and the current component.     }
+    If LastCreatedLibComponent <> Nil Then
+    Begin
+        LibPath := '';
+        Try LibPath := LastCreatedLibComponent.LibReference; Except End;
+        If LibPath = Name Then
+        Begin
+            Result := LastCreatedLibComponent;
+            Exit;
+        End;
+    End;
+
+    { Last resort: the document has not caught up with its own contents. }
+    If RefreshingLib Then Exit;
+    LibPath := '';
+    Try LibPath := SchLib.DocumentName; Except End;
+    If LibPath = '' Then Exit;
+
+    RefreshingLib := True;
+    Try
+        Fresh := RefreshSchLibFromDisk(LibPath);
+        If Fresh <> Nil Then
+        Begin
+            Try Result := Fresh.GetState_SchComponentByLibRef(Name); Except End;
+            If Result = Nil Then Result := ScanLibForComponent(Fresh, Name);
+        End;
+    Finally
+        RefreshingLib := False;
+    End;
+End;
+
 Function Lib_CreateSymbol(Params : String; RequestId : String) : String;
 Var
     Name, DesignatorPrefix, Description : String;
     SchLib : ISch_Lib;
-    Component : ISch_Component;
-    PartCount : Integer;
+    Component, Verify : ISch_Component;
+    PartCount, ActualParts : Integer;
 Begin
     Name := ExtractJsonValue(Params, 'name');
     DesignatorPrefix := ExtractJsonValue(Params, 'designator_prefix');
@@ -314,6 +474,12 @@ Begin
                 Component.I_ObjectAddress);
         Except End;
 
+        { PartCount is re-asserted for the same reason LibReference is, just  }
+        { above: AddSchComponent does not necessarily keep what was set on    }
+        { the detached object.                                                }
+        If PartCount > 1 Then
+            Try Component.PartCount := PartCount; Except End;
+
         SchLib.CurrentSchComponent := Component;
         LastCreatedLibComponent := Component;
 
@@ -321,12 +487,42 @@ Begin
         Try SchLib.GraphicallyInvalidate; Except End;
 
         MarkLibDirty(SchLib);
-        Result := BuildSuccessResponse(RequestId,
-            JsonObj(
-                JsonBool('success', True) + ',' +
-                JsonStr('name', Name) + ',' +
-                JsonInt('part_count', PartCount)
-            ));
+
+        { VERIFY. This used to return success with part_count ECHOED from the }
+        { request. Measured on AD26: part_count=3 produced NO COMPONENT AT     }
+        { ALL, and the reply still said success with part_count 3. The same    }
+        { call with part_count=1 worked, so the failure is specific and silent.}
+        { Resolving the symbol by its LibReference is the cheapest proof it    }
+        { exists, and the count reported is the one READ BACK.                 }
+        Verify := Nil;
+        Try Verify := LookupLibComponent(SchLib, Name); Except End;
+
+        If Verify = Nil Then
+            Result := BuildSuccessResponse(RequestId,
+                JsonObj(
+                    JsonBool('success', False) + ',' +
+                    JsonStr('name', Name) + ',' +
+                    JsonInt('requested_part_count', PartCount) + ',' +
+                    JsonStr('reason', 'the symbol does not resolve in the '
+                        + 'library after being added. A part_count above 1 is '
+                        + 'the known trigger: Altium wants a multi-part '
+                        + 'component to carry primitives for each part. '
+                        + 'Create it single-part, add pins with '
+                        + 'owner_part_id, then raise the part count in the '
+                        + 'library editor.')
+                ))
+        Else
+        Begin
+            ActualParts := PartCount;
+            Try ActualParts := Verify.PartCount; Except End;
+            Result := BuildSuccessResponse(RequestId,
+                JsonObj(
+                    JsonBool('success', True) + ',' +
+                    JsonStr('name', Name) + ',' +
+                    JsonInt('part_count', ActualParts) + ',' +
+                    JsonBool('verified', True)
+                ));
+        End;
     End
     Else
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create symbol');
@@ -429,7 +625,7 @@ Begin
     SchLib := SchServer.GetCurrentSchDocument;
     If (SchLib = Nil) Or (SchLib.ObjectId <> eSchLib) Then Exit;
 
-    Component := SchLib.GetState_SchComponentByLibRef(Name);
+    Component := LookupLibComponent(SchLib, Name);
     If Component = Nil Then Exit;
 
     SchLib.CurrentSchComponent := Component;
@@ -474,7 +670,24 @@ Begin
       reported: a query scoped to part 3 answered about part 1 and
       nothing said so. Nil makes the scope resolve to NOT_FOUND, which
       is a caller can act on. }
-    If Target > 0 Then
+    {
+      ONLY WHEN A PART WAS ACTUALLY ASKED FOR. This gate used to read
+      `If Target > 0`, and Target is never below 1, so the step-and-verify
+      ran on EVERY lookup including the plain by-name one. When the editor
+      reported a part id that was readable but not 1, the walk failed and
+      this returned Nil, so a component that demonstrably existed came back
+      as "not found".
+
+      MEASURED: lib_link_footprint and lib_batch_rename both refused
+      SWEEP_SYM_A and SWEEP_SYM_C while lib_get_component_details and
+      lib_get_pin_list resolved the same names in the same session, because
+      those two go straight to GetState_SchComponentByLibRef and never step.
+
+      The GH #11 protection is about a caller asking for part 3 and being
+      answered about part 1. That only arises when a part was named, which
+      is what PartId > 1 means. A single-part lookup has nothing to verify.
+    }
+    If PartId > 1 Then
     Begin
         If Not StepLibComponentPartTo(SchLib, Component, Target) Then
         Begin
@@ -756,6 +969,38 @@ Begin
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create footprint');
 End;
 
+{ FootprintOriginX / Y - the footprint's own origin, in board coordinates.    }
+{                                                                             }
+{ EVERY AUTHORING CALL HERE MUST OFFSET BY THIS. A PcbLib footprint does not  }
+{ sit at the board coordinate origin: PCBServer.CreatePCBLibComp leaves it at }
+{ Altium's library origin, measured at 50000,50000 mils on AD26. The add      }
+{ handlers used to write MilsToCoord(X) straight into Pad.X, which is an      }
+{ ABSOLUTE board coordinate, so a pad asked for at -50 mils landed 50050 mils }
+{ from the footprint it belonged to.                                          }
+{                                                                             }
+{ MEASURED both ways. A footprint authored by these tools reported its pads   }
+{ at x_mm -1271.27 where -1.27 was asked for, and placing it on a board gave  }
+{ a component with a 52452 x 50144 mil bounding box, a part over four feet    }
+{ across. A hand-authored footprint from a real library reads 0.0 and 2.54,   }
+{ which is what relative-to-origin looks like and what the tools claim to     }
+{ take.                                                                       }
+{                                                                             }
+{ Reading the origin rather than forcing it to zero also fixes footprints     }
+{ that were imported with an origin of their own.                             }
+Function FootprintOriginX(Footprint : IPCB_LibComponent) : TCoord;
+Begin
+    Result := 0;
+    If Footprint = Nil Then Exit;
+    Try Result := Footprint.X; Except End;
+End;
+
+Function FootprintOriginY(Footprint : IPCB_LibComponent) : TCoord;
+Begin
+    Result := 0;
+    If Footprint = Nil Then Exit;
+    Try Result := Footprint.Y; Except End;
+End;
+
 Function Lib_AddFootprintPad(Params : String; RequestId : String) : String;
 Var
     Designator, Shape, LayerStr : String;
@@ -796,8 +1041,8 @@ Begin
     If Pad <> Nil Then
     Begin
         Pad.Name := Designator;
-        Pad.X := MilsToCoord(X);
-        Pad.Y := MilsToCoord(Y);
+        Pad.X := FootprintOriginX(Footprint) + MilsToCoord(X);
+        Pad.Y := FootprintOriginY(Footprint) + MilsToCoord(Y);
         Pad.TopXSize := MilsToCoord(XSize);
         Pad.TopYSize := MilsToCoord(YSize);
         Pad.HoleSize := MilsToCoord(HoleSize);
@@ -825,6 +1070,19 @@ Begin
         Else Pad.TopShape := eRounded;
 
         Footprint.AddPCBObject(Pad);
+        { The primitive must be registered with the library's backing Board as
+          well as with the footprint, and the registration broadcast to both.
+          Footprint.AddPCBObject alone is not enough: the object exists in the
+          working copy, every read reports it, and the save discards it. That
+          cost an afternoon on an LCSC import, where pads and tracks reported
+          success and the footprint came back empty, and it was read as Altium
+          refusing to author land patterns at all. Lib_AddFootprintText had the
+          full sequence and was the only authoring call that survived a save. }
+        PcbLib.Board.AddPCBObject(Pad);
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
+        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
 
         Result := BuildSuccessResponse(RequestId, '{"success":true,"designator":"' + EscapeJsonString(Designator) + '"}');
     End
@@ -902,8 +1160,8 @@ Begin
             End;
 
             Pad.Name := GetBatchField(Op, 'designator');
-            Pad.X := MilsToCoord(X);
-            Pad.Y := MilsToCoord(Y);
+            Pad.X := FootprintOriginX(Footprint) + MilsToCoord(X);
+            Pad.Y := FootprintOriginY(Footprint) + MilsToCoord(Y);
             Pad.TopXSize := MilsToCoord(XSize);
             Pad.TopYSize := MilsToCoord(YSize);
             Pad.HoleSize := MilsToCoord(HoleSize);
@@ -928,6 +1186,19 @@ Begin
             Else Pad.TopShape := eRounded;
 
             Footprint.AddPCBObject(Pad);
+            { The primitive must be registered with the library's backing Board as
+              well as with the footprint, and the registration broadcast to both.
+              Footprint.AddPCBObject alone is not enough: the object exists in the
+              working copy, every read reports it, and the save discards it. That
+              cost an afternoon on an LCSC import, where pads and tracks reported
+              success and the footprint came back empty, and it was read as Altium
+              refusing to author land patterns at all. Lib_AddFootprintText had the
+              full sequence and was the only authoring call that survived a save. }
+            PcbLib.Board.AddPCBObject(Pad);
+            PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+                c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
+            PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+                c_Broadcast, PCBM_BoardRegisteration, Pad.I_ObjectAddress);
             Inc(Added);
         End;
     Finally
@@ -981,14 +1252,27 @@ Begin
     Track := PCBServer.PCBObjectFactory(eTrackObject, eNoDimension, eCreate_Default);
     If Track <> Nil Then
     Begin
-        Track.X1 := MilsToCoord(X1);
-        Track.Y1 := MilsToCoord(Y1);
-        Track.X2 := MilsToCoord(X2);
-        Track.Y2 := MilsToCoord(Y2);
+        Track.X1 := FootprintOriginX(Footprint) + MilsToCoord(X1);
+        Track.Y1 := FootprintOriginY(Footprint) + MilsToCoord(Y1);
+        Track.X2 := FootprintOriginX(Footprint) + MilsToCoord(X2);
+        Track.Y2 := FootprintOriginY(Footprint) + MilsToCoord(Y2);
         Track.Width := MilsToCoord(Width);
         Track.Layer := Layer;
 
         Footprint.AddPCBObject(Track);
+        { The primitive must be registered with the library's backing Board as
+          well as with the footprint, and the registration broadcast to both.
+          Footprint.AddPCBObject alone is not enough: the object exists in the
+          working copy, every read reports it, and the save discards it. That
+          cost an afternoon on an LCSC import, where pads and tracks reported
+          success and the footprint came back empty, and it was read as Altium
+          refusing to author land patterns at all. Lib_AddFootprintText had the
+          full sequence and was the only authoring call that survived a save. }
+        PcbLib.Board.AddPCBObject(Track);
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
+        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
 
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
     End
@@ -1064,14 +1348,27 @@ Begin
                 Continue;
             End;
 
-            Track.X1 := MilsToCoord(X1);
-            Track.Y1 := MilsToCoord(Y1);
-            Track.X2 := MilsToCoord(X2);
-            Track.Y2 := MilsToCoord(Y2);
+            Track.X1 := FootprintOriginX(Footprint) + MilsToCoord(X1);
+            Track.Y1 := FootprintOriginY(Footprint) + MilsToCoord(Y1);
+            Track.X2 := FootprintOriginX(Footprint) + MilsToCoord(X2);
+            Track.Y2 := FootprintOriginY(Footprint) + MilsToCoord(Y2);
             Track.Width := MilsToCoord(Width);
             Track.Layer := Layer;
 
             Footprint.AddPCBObject(Track);
+            { The primitive must be registered with the library's backing Board as
+              well as with the footprint, and the registration broadcast to both.
+              Footprint.AddPCBObject alone is not enough: the object exists in the
+              working copy, every read reports it, and the save discards it. That
+              cost an afternoon on an LCSC import, where pads and tracks reported
+              success and the footprint came back empty, and it was read as Altium
+              refusing to author land patterns at all. Lib_AddFootprintText had the
+              full sequence and was the only authoring call that survived a save. }
+            PcbLib.Board.AddPCBObject(Track);
+            PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+                c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
+            PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+                c_Broadcast, PCBM_BoardRegisteration, Track.I_ObjectAddress);
             Inc(Added);
         End;
     Finally
@@ -1087,7 +1384,14 @@ End;
 
 Function Lib_AddFootprintArc(Params : String; RequestId : String) : String;
 Var
-    XCenter, YCenter, Radius, StartAngle, EndAngle, Width : Integer;
+    XCenter, YCenter, Radius, Width : Integer;
+    { Angles are DOUBLE and are read with StrToFloatDef below. They are     }
+    { declared `float` on the Python side, so the wire carries "360.0" and  }
+    { StrToIntDef returned its DEFAULT on every call. EndAngle came through }
+    { as 0 whatever the caller asked for, so every arc this tool drew had a }
+    { zero sweep while the call reported success. IPCB_Arc takes Doubles,   }
+    { so a half degree need not be rounded away either.                     }
+    StartAngle, EndAngle : Double;
     LayerStr : String;
     PcbLib : IPCB_Library;
     Footprint : IPCB_LibComponent;
@@ -1097,8 +1401,8 @@ Begin
     XCenter := StrToIntDef(ExtractJsonValue(Params, 'x_center'), 0);
     YCenter := StrToIntDef(ExtractJsonValue(Params, 'y_center'), 0);
     Radius := StrToIntDef(ExtractJsonValue(Params, 'radius'), 100);
-    StartAngle := StrToIntDef(ExtractJsonValue(Params, 'start_angle'), 0);
-    EndAngle := StrToIntDef(ExtractJsonValue(Params, 'end_angle'), 360);
+    StartAngle := StrToFloatDef(ExtractJsonValue(Params, 'start_angle'), 0.0);
+    EndAngle := StrToFloatDef(ExtractJsonValue(Params, 'end_angle'), 360.0);
     Width := StrToIntDef(ExtractJsonValue(Params, 'width'), 10);
     LayerStr := ExtractJsonValue(Params, 'layer');
 
@@ -1126,8 +1430,8 @@ Begin
     Arc := PCBServer.PCBObjectFactory(eArcObject, eNoDimension, eCreate_Default);
     If Arc <> Nil Then
     Begin
-        Arc.XCenter := MilsToCoord(XCenter);
-        Arc.YCenter := MilsToCoord(YCenter);
+        Arc.XCenter := FootprintOriginX(Footprint) + MilsToCoord(XCenter);
+        Arc.YCenter := FootprintOriginY(Footprint) + MilsToCoord(YCenter);
         Arc.Radius := MilsToCoord(Radius);
         Arc.StartAngle := StartAngle;
         Arc.EndAngle := EndAngle;
@@ -1135,6 +1439,19 @@ Begin
         Arc.Layer := Layer;
 
         Footprint.AddPCBObject(Arc);
+        { The primitive must be registered with the library's backing Board as
+          well as with the footprint, and the registration broadcast to both.
+          Footprint.AddPCBObject alone is not enough: the object exists in the
+          working copy, every read reports it, and the save discards it. That
+          cost an afternoon on an LCSC import, where pads and tracks reported
+          success and the footprint came back empty, and it was read as Altium
+          refusing to author land patterns at all. Lib_AddFootprintText had the
+          full sequence and was the only authoring call that survived a save. }
+        PcbLib.Board.AddPCBObject(Arc);
+        PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Arc.I_ObjectAddress);
+        PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+            c_Broadcast, PCBM_BoardRegisteration, Arc.I_ObjectAddress);
 
         Result := BuildSuccessResponse(RequestId, '{"success":true}');
     End
@@ -1403,6 +1720,8 @@ End;
 {   in degrees.                                                                }
 Function Lib_GetFootprintPads(Params : String; RequestId : String) : String;
 Var
+    SeenPads : TStringList;
+    PadAddr : String;
     LibPath, FocusedPath, FpWanted, FpName : String;
     ShapeStr, LayerStr, PadsJson, RespJson : String;
     PrimsJson, KindStr : String;
@@ -1492,6 +1811,14 @@ Begin
     Try XOrg := Target.X; Except End;
     Try YOrg := Target.Y; Except End;
 
+    { DEDUPE BY OBJECT ADDRESS. A primitive added in this session is
+      registered with BOTH the footprint and the library's backing board,
+      which is what makes it survive the save, and until the library is
+      reloaded the group iterator yields that one object TWICE.
+      MEASURED: three pads read back as pad_count 6 and eight primitives as
+      16, while the saved file held exactly three and eight. The duplicate
+      is the SAME object, not a second one, so the address separates them. }
+    SeenPads := TStringList.Create;
     PadsJson := '[';
     Count := 0;
     GrpIter := Target.GroupIterator_Create;
@@ -1500,11 +1827,26 @@ Begin
         Pad := GrpIter.FirstPCBObject;
         While Pad <> Nil Do
         Begin
+            PadAddr := '';
+            Try PadAddr := IntToStr(Pad.I_ObjectAddress); Except End;
+            If (PadAddr <> '') And (SeenPads.IndexOf(PadAddr) >= 0) Then
+            Begin
+                Pad := GrpIter.NextPCBObject;
+                Continue;
+            End;
+            If PadAddr <> '' Then SeenPads.Add(PadAddr);
             ShapeStr := 'round';
             Try
                 If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
-                Else If Pad.TopShape = eRoundRectangle Then ShapeStr := 'roundrectangle'
+                { eRoundedRectangular is the PAD SHAPE. This used to test
+                  eRoundRectangle, which is a SCHEMATIC object id. Both
+                  identifiers exist, so nothing errored and the test simply
+                  never matched: every rounded-rectangle pad read back as
+                  round with corner_pct 0, including ones this same library
+                  had just written with
+                  SetState_StackShapeOnLayer(..., eRoundedRectangular). }
+                Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
                 Else ShapeStr := 'round';
             Except End;
 
@@ -1531,6 +1873,7 @@ Begin
         End;
     Finally
         Target.GroupIterator_Destroy(GrpIter);
+        Try SeenPads.Free; Except End;
     End;
     PadsJson := PadsJson + ']';
 
@@ -1735,7 +2078,7 @@ Begin
                             Try
                                 If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
-                                Else If Pad.TopShape = eRoundRectangle Then ShapeStr := 'roundrectangle'
+                                Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
                                 Else ShapeStr := 'round';
                             Except End;
                             LayerStr := 'top';
@@ -3159,9 +3502,18 @@ Begin
     { StandoffHeight and a PLANAR Rotation, and the PCB API reference     }
     { gives the model no X or Y tilt, so reading them would imply a       }
     { capability that does not exist.                                      }
-    OffX := StrToIntDef(ExtractJsonValue(Params, 'offset_x'), 0);
-    OffY := StrToIntDef(ExtractJsonValue(Params, 'offset_y'), 0);
-    OffZ := StrToIntDef(ExtractJsonValue(Params, 'offset_z'), 0);
+    { Parse as FLOAT then round. These three are declared `float` on the    }
+    { Python side, so pydantic turns an argument of 25 into 25.0 and the    }
+    { wire carries "25.0". StrToIntDef cannot read that and returns its     }
+    { default, so EVERY offset arrived as 0, the `If Off <> 0` guards below }
+    { skipped the assignment, and `applied` reported false. That false read }
+    { as "Altium refused the adjustment" when the value had simply never    }
+    { arrived, which is the worst version of this bug: the tool looked      }
+    { honest while silently discarding the caller's numbers. MilsToCoord    }
+    { takes an Integer, hence the Round rather than widening the locals.    }
+    OffX := Round(StrToFloatDef(ExtractJsonValue(Params, 'offset_x'), 0.0));
+    OffY := Round(StrToFloatDef(ExtractJsonValue(Params, 'offset_y'), 0.0));
+    OffZ := Round(StrToFloatDef(ExtractJsonValue(Params, 'offset_z'), 0.0));
     RotZ := StrToFloatDef(ExtractJsonValue(Params, 'rotation_z'), 0.0);
 
     If (ModelPath = '') Or (Not FileExists(ModelPath)) Then
@@ -3232,13 +3584,44 @@ Begin
                 Body.SetState_FromModel;
                 Body.Model := Model;
                 Footprint.AddPCBObject(Body);
+                { Same registration the pad, track, arc and text paths
+                  need. Without it the body lives in the working copy
+                  only: the call reports success, the model loads, and
+                  the save throws it away, which is exactly how this
+                  read as a tool that does nothing at all.
 
-                { Placement adjustments. Each is guarded AND REPORTED:     }
-                { StandoffHeight, Rotation and MoveByXY are documented on  }
-                { the body (MoveByXY via IPCB_Primitive, used on other     }
-                { primitives in PCB.pas) but appear nowhere else in this   }
-                { codebase, so the first live run needs to show which ones }
-                { actually took rather than trusting a blanket success.    }
+                  Missed when the other five were fixed, because that
+                  audit was scoped to handlers named Lib_AddFootprint*
+                  and this one attaches a primitive under a different
+                  name. Audit by the AddPCBObject call, not by what the
+                  handler is called. }
+                PcbLib.Board.AddPCBObject(Body);
+                PCBServer.SendMessageToRobots(Footprint.I_ObjectAddress,
+                    c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+                PCBServer.SendMessageToRobots(PcbLib.Board.I_ObjectAddress,
+                    c_Broadcast, PCBM_BoardRegisteration, Body.I_ObjectAddress);
+
+                { Placement adjustments. Each is guarded AND REPORTED,     }
+                { because a blanket success here would hide which of them  }
+                { actually took.                                           }
+                {                                                          }
+                { Body.Rotation USED TO BE ASSIGNED HERE AND MUST NOT BE.  }
+                { IPCB_ComponentBody exposes no Rotation on AD26 26.9.1.9. }
+                { Measured: the assignment raised "Undeclared identifier:  }
+                { Rotation", and an undeclared identifier is NOT catchable }
+                { in DelphiScript, so the Try around it did nothing and    }
+                { the modal killed the polling loop. The whole bridge went }
+                { down and had to be restarted by hand. The guard read as  }
+                { careful and could never have fired.                      }
+                {                                                          }
+                { The rotation IS reachable, but on the MODEL rather than  }
+                { the body, and BEFORE Body.Model is assigned:             }
+                { AutoSTEPplacer.pas calls Model.SetState(90,0,0,0). The   }
+                { meaning of those four arguments is not documented        }
+                { anywhere this project can verify, so guessing them would }
+                { repeat the mistake this comment exists to record.        }
+                { rotation_z therefore reports false, like rotation_x and  }
+                { rotation_y, until the signature is measured.             }
                 DidStandoff := False;
                 DidRotation := False;
                 DidMove := False;
@@ -3246,11 +3629,6 @@ Begin
                     Try
                         Body.StandoffHeight := MilsToCoord(OffZ);
                         DidStandoff := True;
-                    Except End;
-                If RotZ <> 0 Then
-                    Try
-                        Body.Rotation := RotZ;
-                        DidRotation := True;
                     Except End;
                 If (OffX <> 0) Or (OffY <> 0) Then
                     Try
@@ -3337,6 +3715,28 @@ Begin
         Exit;
     End;
 
+    { A RELATIVE PATH HERE PRODUCES A WRONG ANSWER, NOT AN ERROR.            }
+    { CreateLibCompInfoReader wants a full path. Given a bare basename it    }
+    { resolves against whatever directory it likes and hands back a reader   }
+    { for something else, or a stale view, and the enumeration then looks    }
+    { perfectly ordinary.                                                     }
+    {                                                                         }
+    { MEASURED: called with no library_path against a focused free-document  }
+    { SchLib, this reported ONE component twice in a row while the same call }
+    { WITH the full path reported both that were really there. The default   }
+    { invocation is the one that under-reports, which is the worst way round.}
+    { DM_FullPath returns a basename for a free document, which is how the   }
+    { relative path got in.                                                   }
+    If Not ((Copy(LibPath, 2, 1) = ':') Or (Copy(LibPath, 1, 2) = '\\')) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'RELATIVE_LIBRARY_PATH',
+            'The focused document reports only "' + LibPath + '", not a full '
+            + 'path, and the component reader silently answers about the '
+            + 'wrong file when given one. Pass library_path with the '
+            + 'absolute .SchLib path.');
+        Exit;
+    End;
+
     // Use CreateLibCompInfoReader to enumerate components. ICompInfoReader is
     // a fast metadata reader, it returns CompName, AliasName, PartCount and
     // Description directly from the lib file without loading every symbol's
@@ -3390,7 +3790,7 @@ Begin
             DefDesig := '';
             If (SchLib <> Nil) And (SchLib.ObjectId = eSchLib) Then
             Begin
-                Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                Component := LookupLibComponent(SchLib, CompName);
                 If (Component <> Nil) And WithDesignator Then
                     Try DefDesig := Component.Designator.Text; Except End;
                 If (Component <> Nil) And WithParams Then
@@ -3532,7 +3932,7 @@ Begin
             { what makes parameter-search expensive. }
             If (Not Matched) And SearchParams And (SchLib <> Nil) Then
             Begin
-                Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                Component := LookupLibComponent(SchLib, CompName);
                 If Component <> Nil Then
                 Begin
                     MatchedParam := False;
@@ -3822,7 +4222,7 @@ Begin
 
         ResolvedName := WantName;
         { Fast path: feed Altium's exact bytes straight back. }
-        Result := SchLib.GetState_SchComponentByLibRef(WantName);
+        Result := LookupLibComponent(SchLib, WantName);
         If Result <> Nil Then Exit;
 
         { Fallback: iterate live symbols, byte-exact LibReference compare. }
@@ -3864,7 +4264,7 @@ Begin
         Exit;
     End;
     ResolvedName := WantName;
-    Result := SchLib.GetState_SchComponentByLibRef(WantName);
+    Result := LookupLibComponent(SchLib, WantName);
     If Result = Nil Then
     Begin
         ErrCode := 'COMPONENT_NOT_FOUND';
@@ -4118,10 +4518,11 @@ Var
     Workspace : IWorkspace;
     WDoc : IDocument;
     F : TextFile;
-    Line, CompName, ParamName, ParamValue : String;
+    Line, CompName, ParamName, ParamValue, FailReasons : String;
     PipePos1, PipePos2 : Integer;
     Updated, Created, Failed, LineNum : Integer;
 Begin
+    FailReasons := '';
     LibPath := ExtractJsonValue(Params, 'library_path');
     BatchPath := ExtractJsonValue(Params, 'batch_file');
 
@@ -4185,23 +4586,31 @@ Begin
                 If PipePos1 = 0 Then
                 Begin
                     Inc(Failed);
+                    AddFailReason(FailReasons, Line, 'no | separator on the line');
                     Continue;
                 End;
-                CompName := Copy(Line, 1, PipePos1 - 1);
+                CompName := Trim(Copy(Line, 1, PipePos1 - 1));
                 Line := Copy(Line, PipePos1 + 1, Length(Line));
                 PipePos2 := Pos('|', Line);
                 If PipePos2 = 0 Then
                 Begin
                     Inc(Failed);
+                    AddFailReason(FailReasons, CompName,
+                        'the line has only one | separator, so there is no value');
                     Continue;
                 End;
-                ParamName := Copy(Line, 1, PipePos2 - 1);
-                ParamValue := Copy(Line, PipePos2 + 1, Length(Line));
+                ParamName := Trim(Copy(Line, 1, PipePos2 - 1));
+                { ParamValue is the LAST field, which is exactly where a CRLF }
+                { line ending left a stray carriage return. Without this trim }
+                { the parameter was written with a CR glued to its value.     }
+                ParamValue := Trim(Copy(Line, PipePos2 + 1, Length(Line)));
 
-                Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                Component := LookupLibComponent(SchLib, CompName);
                 If Component = Nil Then
                 Begin
                     Inc(Failed);
+                    AddFailReason(FailReasons, CompName,
+                        'no component with that library reference');
                     Continue;
                 End;
 
@@ -4285,7 +4694,8 @@ Begin
         '{"updated":' + IntToStr(Updated) +
         ',"created":' + IntToStr(Created) +
         ',"failed":' + IntToStr(Failed) +
-        ',"total_lines":' + IntToStr(LineNum) + '}');
+        ',"total_lines":' + IntToStr(LineNum) +
+        ',"failures":[' + FailReasons + ']}');
 End;
 
 {..............................................................................}
@@ -4301,10 +4711,11 @@ Var
     Doc : IDocument;
     ServerDoc : IServerDocument;
     F : TextFile;
-    Line, OldName, NewName : String;
+    Line, OldName, NewName, FailReasons : String;
     PipePos : Integer;
     Renamed, Failed, LineNum : Integer;
 Begin
+    FailReasons := '';
     LibPath := ExtractJsonValue(Params, 'library_path');
     BatchPath := ExtractJsonValue(Params, 'batch_file');
     If BatchPath = '' Then
@@ -4373,15 +4784,30 @@ Begin
                 If PipePos = 0 Then
                 Begin
                     Inc(Failed);
+                    AddFailReason(FailReasons, Line, 'no | separator on the line');
                     Continue;
                 End;
-                OldName := Copy(Line, 1, PipePos - 1);
-                NewName := Copy(Line, PipePos + 1, Length(Line));
+                { Trim both. The batch file is written from Python and used to }
+                { arrive CRLF-terminated, so ReadLn left the carriage return   }
+                { glued to the LAST field: the rename then set a LibReference  }
+                { ending in CR. Python no longer translates, and this trims    }
+                { anyway, because a writer is easy to change back by accident. }
+                OldName := Trim(Copy(Line, 1, PipePos - 1));
+                NewName := Trim(Copy(Line, PipePos + 1, Length(Line)));
 
-                Component := SchLib.GetState_SchComponentByLibRef(OldName);
+                If NewName = '' Then
+                Begin
+                    Inc(Failed);
+                    AddFailReason(FailReasons, OldName, 'the new name is empty');
+                    Continue;
+                End;
+
+                Component := LookupLibComponent(SchLib, OldName);
                 If Component = Nil Then
                 Begin
                     Inc(Failed);
+                    AddFailReason(FailReasons, OldName,
+                        'no component with that library reference');
                     Continue;
                 End;
 
@@ -4405,7 +4831,8 @@ Begin
     Result := BuildSuccessResponse(RequestId,
         '{"renamed":' + IntToStr(Renamed) +
         ',"failed":' + IntToStr(Failed) +
-        ',"total_lines":' + IntToStr(LineNum) + '}');
+        ',"total_lines":' + IntToStr(LineNum) +
+        ',"failures":[' + FailReasons + ']}');
 End;
 
 {..............................................................................}
@@ -4505,7 +4932,11 @@ End;
 
 Function Lib_AddSymbolArc(Params : String; RequestId : String) : String;
 Var
-    XCenter, YCenter, Radius, StartAngle, EndAngle, Width : Integer;
+    XCenter, YCenter, Radius, Width : Integer;
+    { Same defect as Lib_AddFootprintArc: `float` on the Python side, so    }
+    { StrToIntDef never read the wire value and every symbol arc was drawn  }
+    { with a zero sweep.                                                    }
+    StartAngle, EndAngle : Double;
     SchLib : ISch_Lib;
     Component : ISch_Component;
     Arc : ISch_Arc;
@@ -4513,8 +4944,8 @@ Begin
     XCenter := StrToIntDef(ExtractJsonValue(Params, 'x_center'), 0);
     YCenter := StrToIntDef(ExtractJsonValue(Params, 'y_center'), 0);
     Radius := StrToIntDef(ExtractJsonValue(Params, 'radius'), 100);
-    StartAngle := StrToIntDef(ExtractJsonValue(Params, 'start_angle'), 0);
-    EndAngle := StrToIntDef(ExtractJsonValue(Params, 'end_angle'), 360);
+    StartAngle := StrToFloatDef(ExtractJsonValue(Params, 'start_angle'), 0.0);
+    EndAngle := StrToFloatDef(ExtractJsonValue(Params, 'end_angle'), 360.0);
     Width := StrToIntDef(ExtractJsonValue(Params, 'width'), 1);
     If Width < 0 Then Width := 0;
     If Width > 3 Then Width := 3;
@@ -4688,7 +5119,7 @@ Begin
         Exit;
     End;
 
-    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+    Component := LookupLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND', 'Component not found: ' + CompName);
@@ -4761,7 +5192,7 @@ Begin
         Exit;
     End;
 
-    Component := SchLib.GetState_SchComponentByLibRef(WantName);
+    Component := LookupLibComponent(SchLib, WantName);
     If Component = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
@@ -4896,7 +5327,7 @@ Begin
             'Failed to focus source library at ' + SourceLibPath);
         Exit;
     End;
-    SourceComp := SourceLib.GetState_SchComponentByLibRef(SourceName);
+    SourceComp := LookupLibComponent(SourceLib, SourceName);
     If SourceComp = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
@@ -4936,7 +5367,7 @@ Begin
     End;
 
     Overwrote := False;
-    Existing := DestLib.GetState_SchComponentByLibRef(NewName);
+    Existing := LookupLibComponent(DestLib, NewName);
     If Existing <> Nil Then
     Begin
         If Not Overwrite Then
@@ -5491,7 +5922,7 @@ Begin
             Try CompName := CompInfo.CompName; Except End;
             If CompName = '' Then Continue;
 
-            Component := SchLib.GetState_SchComponentByLibRef(CompName);
+            Component := LookupLibComponent(SchLib, CompName);
             If Component = Nil Then Continue;
 
             { Read designator font_id / color via the typed ISch_Label local. }
@@ -5842,7 +6273,7 @@ Begin
         Begin
             { Single-component mode. }
             Scope := 'single';
-            Component := SchLib.GetState_SchComponentByLibRef(CompName);
+            Component := LookupLibComponent(SchLib, CompName);
             If Component = Nil Then
             Begin
                 Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
@@ -5887,7 +6318,7 @@ Begin
                     CompName := '';
                     Try CompName := CompInfo.CompName; Except End;
                     If CompName = '' Then Continue;
-                    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                    Component := LookupLibComponent(SchLib, CompName);
                     If Component = Nil Then Continue;
                     Inc(Total);
 
@@ -6106,7 +6537,7 @@ Begin
             If CompName <> '' Then
             Begin
                 Scope := 'single';
-                Component := SchLib.GetState_SchComponentByLibRef(CompName);
+                Component := LookupLibComponent(SchLib, CompName);
                 If Component = Nil Then
                 Begin
                     Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',
@@ -6149,7 +6580,7 @@ Begin
                         CurCompName := '';
                         Try CurCompName := CompInfo.CompName; Except End;
                         If CurCompName = '' Then Continue;
-                        Component := SchLib.GetState_SchComponentByLibRef(CurCompName);
+                        Component := LookupLibComponent(SchLib, CurCompName);
                         If Component = Nil Then Continue;
                         Inc(Total);
 
@@ -6842,7 +7273,7 @@ Begin
 
     { Refuse to collide with an existing part. If new_name already resolves }
     { and it is a different object, the rename would create a duplicate.    }
-    Existing := SchLib.GetState_SchComponentByLibRef(NewName);
+    Existing := LookupLibComponent(SchLib, NewName);
     If (Existing <> Nil) And (Existing <> Component) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NAME_EXISTS',
@@ -6992,7 +7423,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active and library_path did not resolve');
         Exit;
     End;
-    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+    Component := LookupLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND', 'Component not found in ' + LibPath + ': ' + CompName);
@@ -7200,7 +7631,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active and library_path did not resolve');
         Exit;
     End;
-    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+    Component := LookupLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND', 'Component not found in ' + LibPath + ': ' + CompName);
@@ -7317,7 +7748,7 @@ Begin
 
         For C := 0 To CompNames.Count - 1 Do
         Begin
-            Component := SchLib.GetState_SchComponentByLibRef(CompNames[C]);
+            Component := LookupLibComponent(SchLib, CompNames[C]);
             If Component = Nil Then Continue;
 
             { Bug 2: the stale origin string is a COMPONENT-level property. Clear }
@@ -7526,7 +7957,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHLIB', 'No schematic library is active and library_path did not resolve');
         Exit;
     End;
-    Component := SchLib.GetState_SchComponentByLibRef(CompName);
+    Component := LookupLibComponent(SchLib, CompName);
     If Component = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND', 'Component not found in ' + LibPath + ': ' + CompName);
@@ -7586,6 +8017,8 @@ End;
 { Params: footprint_name (required), library_path (optional).                    }
 Function Lib_ProbeFootprint(Params : String; RequestId : String) : String;
 Var
+    SeenPrims : TStringList;
+    PrimAddr : String;
     LibPath, FocusedPath, FpWanted, FpName, FpDescr, PrimsJson, RespJson, TxtVal : String;
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -7662,6 +8095,14 @@ Begin
     Try FpDescr := Target.Description; Except End;
     Try HeightMils := CoordToMils(Target.Height); Except End;
 
+    { DEDUPE BY OBJECT ADDRESS. A primitive added in this session is
+      registered with BOTH the footprint and the library's backing board,
+      which is what makes it survive the save, and until the library is
+      reloaded the group iterator yields that one object TWICE.
+      MEASURED: three pads read back as pad_count 6 and eight primitives as
+      16, while the saved file held exactly three and eight. The duplicate
+      is the SAME object, not a second one, so the address separates them. }
+    SeenPrims := TStringList.Create;
     PrimsJson := '[';
     PFirst := True;
     PrimCount := 0;
@@ -7670,6 +8111,14 @@ Begin
         Prim := GrpIter.FirstPCBObject;
         While Prim <> Nil Do
         Begin
+            PrimAddr := '';
+            Try PrimAddr := IntToStr(Prim.I_ObjectAddress); Except End;
+            If (PrimAddr <> '') And (SeenPrims.IndexOf(PrimAddr) >= 0) Then
+            Begin
+                Prim := GrpIter.NextPCBObject;
+                Continue;
+            End;
+            If PrimAddr <> '' Then SeenPrims.Add(PrimAddr);
             Inc(PrimCount);
             TxtVal := '';
             If Prim.ObjectId = eTextObject Then
@@ -7688,6 +8137,7 @@ Begin
         End;
     Finally
         Target.GroupIterator_Destroy(GrpIter);
+        Try SeenPrims.Free; Except End;
     End;
     PrimsJson := PrimsJson + ']';
 
@@ -7776,10 +8226,10 @@ Begin
         Name := NextBatchOp(Remaining);
         If Name = '' Then Break;
 
-        SourceComp := SourceLib.GetState_SchComponentByLibRef(Name);
+        SourceComp := LookupLibComponent(SourceLib, Name);
         If SourceComp = Nil Then Begin Inc(Failed); Continue; End;
 
-        Existing := DestLib.GetState_SchComponentByLibRef(Name);
+        Existing := LookupLibComponent(DestLib, Name);
         If (Existing <> Nil) And (Not Overwrite) Then Begin Inc(Skipped); Continue; End;
 
         NewComp := SourceComp.Replicate;
@@ -8070,6 +8520,8 @@ End;
 { Params: footprint_name (required), library_path (optional, focused).       }
 Function Lib_GetPadGeometry(Params : String; RequestId : String) : String;
 Var
+    SeenPads : TStringList;
+    PadAddr : String;
     LibPath, FocusedPath, FpWanted, FpName, FpDescr : String;
     ShapeStr, HoleStr, LayerStr, PadsJson, RespJson, ExpSrc : String;
     Workspace : IWorkspace;
@@ -8149,6 +8601,14 @@ Begin
     Try XOrg := Target.X; Except End;
     Try YOrg := Target.Y; Except End;
 
+    { DEDUPE BY OBJECT ADDRESS. A primitive added in this session is
+      registered with BOTH the footprint and the library's backing board,
+      which is what makes it survive the save, and until the library is
+      reloaded the group iterator yields that one object TWICE.
+      MEASURED: three pads read back as pad_count 6 and eight primitives as
+      16, while the saved file held exactly three and eight. The duplicate
+      is the SAME object, not a second one, so the address separates them. }
+    SeenPads := TStringList.Create;
     PadsJson := '[';
     Count := 0;
     GrpIter := Target.GroupIterator_Create;
@@ -8157,11 +8617,19 @@ Begin
         Pad := GrpIter.FirstPCBObject;
         While Pad <> Nil Do
         Begin
+            PadAddr := '';
+            Try PadAddr := IntToStr(Pad.I_ObjectAddress); Except End;
+            If (PadAddr <> '') And (SeenPads.IndexOf(PadAddr) >= 0) Then
+            Begin
+                Pad := GrpIter.NextPCBObject;
+                Continue;
+            End;
+            If PadAddr <> '' Then SeenPads.Add(PadAddr);
             ShapeStr := 'round';
             Try
                 If Pad.TopShape = eRectangular Then ShapeStr := 'rectangular'
                 Else If Pad.TopShape = eOctagonal Then ShapeStr := 'octagonal'
-                Else If Pad.TopShape = eRoundRectangle Then ShapeStr := 'roundrectangle'
+                Else If Pad.TopShape = eRoundedRectangular Then ShapeStr := 'roundrectangle'
                 Else ShapeStr := 'round';
             Except End;
 
@@ -8247,6 +8715,7 @@ Begin
         End;
     Finally
         Target.GroupIterator_Destroy(GrpIter);
+        Try SeenPads.Free; Except End;
     End;
     PadsJson := PadsJson + ']';
 
@@ -8334,7 +8803,7 @@ Begin
         Try
             For C := 0 To AllNames.Count - 1 Do
             Begin
-                Component := SchLib.GetState_SchComponentByLibRef(AllNames[C]);
+                Component := LookupLibComponent(SchLib, AllNames[C]);
                 If Component = Nil Then Continue;
                 Inc(Total);
 
@@ -9373,25 +9842,45 @@ Begin
                     End;
                     Prim := GrpIter.NextPCBObject;
                 End;
+                { REMOVE WHILE THE ITERATOR IS STILL OPEN.
+
+                  This used to destroy the iterator first, on the reasoning
+                  that a closed iterator cannot have its walk disturbed by
+                  the removal. It cannot, but that was never the risk:
+                  GroupIterator_Destroy releases what the iterator handed
+                  out, so Prim was dangling by the time it was removed, and
+                  the engine died on a null read inside
+                  ScriptingSystem.DLL. An access violation in the DLL is
+                  not something the Try below can catch, so the whole
+                  polling loop went with it.
+
+                  Removing here is safe because the walk STOPS at the first
+                  match: the Break above means NextPCBObject is never called
+                  again on this iterator, so the skip-entries problem that
+                  the one-match-per-pass design exists to avoid cannot
+                  arise. The outer loop takes a fresh iterator for the next
+                  one. }
+                If Found And (Prim <> Nil) Then
+                Begin
+                    Try
+                        Target.RemovePCBObject(Prim);
+                        Removed := Removed + 1;
+                        If RemovedJson <> '' Then
+                            RemovedJson := RemovedJson + ',';
+                        RemovedJson := RemovedJson + '"'
+                            + EscapeJsonString(GetLayerString(MatchLayer))
+                            + '"';
+                    Except
+                        { It matched and would not go. Stop rather than
+                          loop on it forever. }
+                        Found := False;
+                    End;
+                End;
             Finally
                 Target.GroupIterator_Destroy(GrpIter);
             End;
 
             If Not Found Then Break;
-
-            { Prim still carries the narrowing it got from the iterator, }
-            { and the iterator is closed, so the walk cannot be           }
-            { disturbed by the removal.                                   }
-            Try
-                Target.RemovePCBObject(Prim);
-                Removed := Removed + 1;
-                If RemovedJson <> '' Then RemovedJson := RemovedJson + ',';
-                RemovedJson := RemovedJson + '"'
-                    + EscapeJsonString(GetLayerString(MatchLayer)) + '"';
-            Except
-                { It matched and would not go. Stop rather than loop on it. }
-                Break;
-            End;
         End;
 
         PCBServer.SendMessageToRobots(Target.I_ObjectAddress,

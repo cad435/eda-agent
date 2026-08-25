@@ -368,64 +368,93 @@ Begin
     Result := '';
     First := (TotalMatched = 0);
 
+    { EVERY PreProcess BELOW IS IN A Try/Finally, and that is not tidiness.   }
+    {                                                                          }
+    { An exception anywhere between PreProcess and PostProcess leaves Altium   }
+    { believing a command is still running. From then on EVERY save of a PCB   }
+    { document is refused with "A command is currently active and save cannot  }
+    { be completed at this time", the editor offers to write a copy instead,   }
+    { and NOTHING CLEARS IT: not restarting the polling loop, because the      }
+    { state lives in the PCB server rather than the script, and not Escape in  }
+    { the editor.                                                              }
+    {                                                                          }
+    { MEASURED on 2026-08-25: a PcbLib and its board went a whole day without  }
+    { a successful save while SchLib documents beside them saved normally,     }
+    { and the authored footprints existed only in memory.                      }
+    {                                                                          }
+    { The loop body calls MatchesFilterPCB, BuildObjectJsonPCB and             }
+    { ApplySetPropertiesPCB, all of which touch caller-supplied property names }
+    { on arbitrary primitives, so raising is an ordinary outcome here rather   }
+    { than a remote possibility. AltiumScriptCentral ships a whole recovery    }
+    { script for this symptom, which is a fair measure of how often it bites.  }
     If Mode = 'delete' Then
     Begin
         PCBServer.PreProcess;
-        MaxIter := 100000;
-        While MaxIter > 0 Do
-        Begin
-            Iterator := Board.BoardIterator_Create;
-            Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
-            Iterator.AddFilter_LayerSet(AllLayers);
-            Iterator.AddFilter_Method(eProcessAll);
-            FoundObj := Nil;
-            Obj := Iterator.FirstPCBObject;
-            While Obj <> Nil Do
+        Try
+            MaxIter := 100000;
+            While MaxIter > 0 Do
             Begin
-                If MatchesFilterPCB(Obj, FilterStr) Then Begin FoundObj := Obj; Break; End;
-                Obj := Iterator.NextPCBObject;
+                Iterator := Board.BoardIterator_Create;
+                Try
+                    Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+                    Iterator.AddFilter_LayerSet(AllLayers);
+                    Iterator.AddFilter_Method(eProcessAll);
+                    FoundObj := Nil;
+                    Obj := Iterator.FirstPCBObject;
+                    While Obj <> Nil Do
+                    Begin
+                        If MatchesFilterPCB(Obj, FilterStr) Then Begin FoundObj := Obj; Break; End;
+                        Obj := Iterator.NextPCBObject;
+                    End;
+                Finally
+                    Board.BoardIterator_Destroy(Iterator);
+                End;
+                If FoundObj = Nil Then Break;
+                PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+                    PCBM_BoardRegisteration, FoundObj.I_ObjectAddress);
+                Board.RemovePCBObject(FoundObj);
+                Inc(TotalMatched);
+                Dec(MaxIter);
             End;
-            Board.BoardIterator_Destroy(Iterator);
-            If FoundObj = Nil Then Break;
-            PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
-                PCBM_BoardRegisteration, FoundObj.I_ObjectAddress);
-            Board.RemovePCBObject(FoundObj);
-            Inc(TotalMatched);
-            Dec(MaxIter);
+        Finally
+            PCBServer.PostProcess;
         End;
-        PCBServer.PostProcess;
         Exit;
     End;
 
     If Mode = 'modify' Then PCBServer.PreProcess;
+    Try
+        Iterator := Board.BoardIterator_Create;
+        Try
+            Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
+            Iterator.AddFilter_LayerSet(AllLayers);
+            Iterator.AddFilter_Method(eProcessAll);
 
-    Iterator := Board.BoardIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(ObjTypeInt));
-    Iterator.AddFilter_LayerSet(AllLayers);
-    Iterator.AddFilter_Method(eProcessAll);
-
-    Obj := Iterator.FirstPCBObject;
-    While Obj <> Nil Do
-    Begin
-        If (Limit > 0) And (TotalMatched >= Limit) Then Break;
-        If MatchesFilterPCB(Obj, FilterStr) Then
-        Begin
-            If Mode = 'query' Then
+            Obj := Iterator.FirstPCBObject;
+            While Obj <> Nil Do
             Begin
-                ObjJson := BuildObjectJsonPCB(Obj, PropsStr);
-                If Not First Then Result := Result + ',';
-                First := False;
-                Result := Result + ObjJson;
-            End
-            Else If Mode = 'modify' Then
-                ApplySetPropertiesPCB(Obj, SetStr);
-            Inc(TotalMatched);
+                If (Limit > 0) And (TotalMatched >= Limit) Then Break;
+                If MatchesFilterPCB(Obj, FilterStr) Then
+                Begin
+                    If Mode = 'query' Then
+                    Begin
+                        ObjJson := BuildObjectJsonPCB(Obj, PropsStr);
+                        If Not First Then Result := Result + ',';
+                        First := False;
+                        Result := Result + ObjJson;
+                    End
+                    Else If Mode = 'modify' Then
+                        ApplySetPropertiesPCB(Obj, SetStr);
+                    Inc(TotalMatched);
+                End;
+                Obj := Iterator.NextPCBObject;
+            End;
+        Finally
+            Board.BoardIterator_Destroy(Iterator);
         End;
-        Obj := Iterator.NextPCBObject;
+    Finally
+        If Mode = 'modify' Then PCBServer.PostProcess;
     End;
-
-    Board.BoardIterator_Destroy(Iterator);
-    If Mode = 'modify' Then PCBServer.PostProcess;
 End;
 
 Function ProcessActivePCBDoc(ObjTypeInt : Integer;

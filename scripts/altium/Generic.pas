@@ -1235,6 +1235,32 @@ Begin
 
     If PropsStr = '' Then PropsStr := 'Location.X,Location.Y';
     ParseScope(Scope, ScopeType, ScopePath);
+
+    { A PCB OBJECT TYPE CANNOT HONOUR A SCOPE, so say so before doing         }
+    { anything. PCB primitives live on a board and the PCB path below resolves }
+    { one by itself; ScopeType never reaches it.                              }
+    {                                                                          }
+    { MEASURED: obj_query(eArcObject, scope="lib_component:SWEEP_SYM_A")       }
+    { returned 19 arcs belonging to an unrelated client BOARD. The scope was   }
+    { silently discarded and the answer looked entirely ordinary, which is the }
+    { same wrong-document failure the board readers have.                      }
+    {                                                                          }
+    { Checked BEFORE ApplyLibComponentScope on purpose: that call MOVES the    }
+    { active SchLib's current component as a side effect, and doing so for a   }
+    { query that is about to be refused would leave the editor somewhere the   }
+    { caller never asked for.                                                  }
+    If (ObjectTypeFromStringPCB(ObjTypeStr) <> -1)
+        And (ScopeType <> 'active_doc') Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'SCOPE_NOT_SUPPORTED',
+            'A PCB object type cannot be scoped with "' + Scope + '". PCB '
+            + 'primitives live on a board, and this query always reads the '
+            + 'active one, so a document, project or lib_component scope '
+            + 'would be silently ignored. Activate the board you mean and '
+            + 'query it with the default scope.');
+        Exit;
+    End;
+
     If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NOT_FOUND',
@@ -1508,8 +1534,21 @@ Begin
         End;
     End;
 
+    { DISPATCHED, NOT EXECUTED. Altium's RunProcess returns nothing and       }
+    { raises nothing for a process that does not exist, so this handler       }
+    { cannot tell a command that ran from a name that was silently ignored.   }
+    { MEASURED: obj_run_process("Sch:ThisProcessDoesNotExist") returned        }
+    { success true. Reporting that as success is the same defect as #83 in    }
+    { app_run_menu, which was fixed while this sibling was left alone.        }
+    {                                                                          }
+    { The key is named for what is actually known. Anything that needs to      }
+    { know the command took effect has to read the design back.               }
     RunProcess(ProcessName);
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"process":"' + EscapeJsonString(ProcessName) + '"}');
+    Result := BuildSuccessResponse(RequestId,
+        '{"dispatched":true,"process":"' + EscapeJsonString(ProcessName) + '"'
+        + ',"note":"Altium accepts an unknown process name without error, so '
+        + 'this reports that the command was SENT, not that it ran. Verify by '
+        + 'reading the design."}');
 End;
 
 {..............................................................................}

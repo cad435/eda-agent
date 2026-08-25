@@ -1118,8 +1118,8 @@ Var
     ViolationCount : Integer;
     Iterator : IPCB_BoardIterator;
     Violation : IPCB_Violation;
-    JsonItems : String;
-    First : Boolean;
+    JsonItems, ReportPath : String;
+    First, ReportPresent : Boolean;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -1160,9 +1160,40 @@ Begin
     End;
     Board.BoardIterator_Destroy(Iterator);
 
-    Result := BuildSuccessResponse(RequestId,
-        '{"violation_count":' + IntToStr(ViolationCount) + ','
-        + '"violations":[' + JsonItems + ']}');
+    { A ZERO HERE USED TO BE INDISTINGUISHABLE FROM A CANCELLED CHECK.       }
+    { PCB:DesignRuleCheck opens the Design Rule Checker dialog on AD26.      }
+    { MEASURED: pressing Cancel produced violation_count 0 with an empty     }
+    { list, byte-identical to a board that genuinely passes. A caller was    }
+    { told the good news either way, which is the worst shape this bug takes.}
+    {                                                                         }
+    { There is no verified silent form of the process. The only corroboration }
+    { available in-process is the .DRC report Altium writes beside the board  }
+    { when the check actually runs, so its presence is reported and a zero is }
+    { explicitly qualified rather than left to speak for itself. Nothing is   }
+    { deleted to force the issue: that would mean removing a file from the    }
+    { user's project folder to answer a question.                             }
+    ReportPath := '';
+    ReportPresent := False;
+    Try ReportPath := ChangeFileExt(Board.FileName, '.DRC'); Except End;
+    If ReportPath <> '' Then
+        Try ReportPresent := FileExists(ReportPath); Except End;
+
+    If (ViolationCount = 0) And (Not ReportPresent) Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"violation_count":0,"violations":[],"drc_confirmed":false'
+            + ',"report_present":false'
+            + ',"report_path":"' + EscapeJsonString(ReportPath) + '"'
+            + ',"reason":"no violations were found AND no .DRC report exists, '
+            + 'so this zero does NOT mean the board is clean. The Design Rule '
+            + 'Checker is a dialog on this build: if it was cancelled the '
+            + 'check never ran. Confirm the dialog was answered, or drive it '
+            + 'with app_run_ui_command."}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            '{"violation_count":' + IntToStr(ViolationCount) + ','
+            + '"drc_confirmed":' + BoolToJsonStr(ReportPresent) + ','
+            + '"report_present":' + BoolToJsonStr(ReportPresent) + ','
+            + '"violations":[' + JsonItems + ']}');
 End;
 
 {..............................................................................}

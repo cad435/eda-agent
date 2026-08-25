@@ -572,6 +572,8 @@ End;
 {..............................................................................}
 
 Function App_SaveAll(RequestId : String) : String;
+Var
+    StillDirty : Integer;
 Begin
     Try
         // Iterate every IServerDocument the editor has open and DoFileSave
@@ -579,7 +581,24 @@ Begin
         // silently no-ops in some workspace states, and project-walk-based
         // saves, which skip free documents.
         SaveAllDirty;
-        Result := BuildSuccessResponse(RequestId, '{"saved":true}');
+
+        { COUNT WHAT IS STILL DIRTY. DoFileSave does not raise when the      }
+        { editor declines, so "no exception" was never evidence of a save.   }
+        { MEASURED: Altium raised "A command is currently active and save    }
+        { cannot be completed at this time" once per dirty document, every   }
+        { one of those saves was declined, and this returned saved:true.     }
+        StillDirty := CountDirtyDocuments;
+        If StillDirty = 0 Then
+            Result := BuildSuccessResponse(RequestId,
+                '{"saved":true,"still_dirty":0}')
+        Else
+            Result := BuildSuccessResponse(RequestId,
+                '{"saved":false,"still_dirty":' + IntToStr(StillDirty) + ''
+                + ',"reason":"documents remain modified after the save pass. '
+                + 'Altium declines a save while a command is active in the '
+                + 'editor, and asks whether to write a copy instead; that '
+                + 'prompt is answered by a human, not here. Clear the active '
+                + 'command and retry."}');
     Except
         Result := BuildErrorResponse(RequestId, 'SAVE_FAILED', 'SaveAllDirty raised an exception');
     End;
@@ -641,10 +660,74 @@ Begin
         '],"exception":"' + EscapeJsonString(ExceptionMsg) + '"}');
 End;
 
+{ App_ExitActiveCommand - close a transaction a CRASHED handler left open.    }
+{                                                                             }
+{ Altium refuses every save while a command is active, with "A command is     }
+{ currently active and save cannot be completed at this time. Do you want to  }
+{ save copy of current document?". That state lives in the PCB SERVER, not in }
+{ the script, so RESTARTING THE POLLING LOOP DOES NOT CLEAR IT and neither    }
+{ does Escape in the editor.                                                  }
+{                                                                             }
+{ MEASURED on 2026-08-25: saves were being refused on a BRAND NEW library      }
+{ whose only operations were create, activate and create-symbol. The state was }
+{ left earlier the same day by lib_link_3d_model faulting mid-handler on the   }
+{ undeclared Body.Rotation, after PCBServer.PreProcess and before its          }
+{ PostProcess. It then survived several script restarts.                       }
+{                                                                             }
+{ Every PreProcess in this codebase is paired, including on the error paths,   }
+{ so this is not a leak here: it is recovery from a handler that DIED between  }
+{ the two. AltiumScriptCentral ships the same one-line remedy as               }
+{ ExitActiveCommand.vbs, and the note there names the cause as "a script which }
+{ crashed before it could call PCBServer.PostProcess".                         }
+{                                                                             }
+{ Calling PostProcess with nothing outstanding is harmless, which is why the   }
+{ reference script does exactly this and nothing else.                         }
+Function App_ExitActiveCommand(RequestId : String) : String;
+Var
+    PcbOk, SchOk : Boolean;
+    DirtyBefore, DirtyAfter, I : Integer;
+Begin
+    DirtyBefore := CountDirtyDocuments;
+
+    { REPEATED, because PreProcess NESTS and one leak is not the only shape.  }
+    { A single PostProcess was measured NOT to clear a real stuck state, and  }
+    { the depth cannot be queried through the API, so the only way down is to }
+    { unwind further than any plausible leak. Calling it with nothing         }
+    { outstanding is harmless, which is the whole basis of the one-line       }
+    { remedy in ExitActiveCommand.vbs.                                        }
+    PcbOk := False;
+    For I := 1 To 8 Do
+        Try
+            PCBServer.PostProcess;
+            PcbOk := True;
+        Except End;
+
+    { The schematic server keeps its own transaction, and a SchLib handler    }
+    { can die the same way, so close that too. Its PostProcess takes the      }
+    { document, and Nil means "whatever is current".                          }
+    SchOk := False;
+    Try
+        SchServer.ProcessControl.PostProcess(SchServer.GetCurrentSchDocument, '');
+        SchOk := True;
+    Except End;
+
+    DirtyAfter := CountDirtyDocuments;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"pcb_post_process":' + BoolToJsonStr(PcbOk)
+        + ',"sch_post_process":' + BoolToJsonStr(SchOk)
+        + ',"dirty_before":' + IntToStr(DirtyBefore)
+        + ',"dirty_after":' + IntToStr(DirtyAfter)
+        + ',"note":"this closes a transaction left open by a handler that '
+        + 'died between PreProcess and PostProcess. It does not itself save '
+        + 'anything: call app_save_all afterwards and check still_dirty."}');
+End;
+
 Function HandleApplicationCommand(Action : String; Params : String; RequestId : String) : String;
 Begin
     Case Action Of
         'ping':                Result := App_Ping(RequestId);
+        'exit_active_command': Result := App_ExitActiveCommand(RequestId);
         'get_version':         Result := App_GetVersion(RequestId);
         'get_open_documents':  Result := App_GetOpenDocuments(RequestId);
         'get_active_document': Result := App_GetActiveDocument(RequestId);

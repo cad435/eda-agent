@@ -722,11 +722,20 @@ def register_project_tools(mcp):
     async def proj_get_board_info() -> dict[str, Any]:
         """Get PCB board information, outline vertices, layer stack, origin.
 
-        Requires an active PCB document.
+        IT DOES NOT REQUIRE A PCB TO BE ACTIVE, which is what this used
+        to claim. The handler resolves ANY open board, so with a
+        schematic focused it answers about some other document.
+        MEASURED: with a schematic active and a two-document project
+        focused, it returned an outline belonging to neither, and gave
+        no way to tell.
+
+        ``board_path`` in the reply names the document that actually
+        answered. Check it before trusting the geometry, or activate
+        the board you mean first.
 
         Returns:
-            Dictionary with origin_x, origin_y, outline (vertex array),
-            and layers (active copper layer names)
+            Dictionary with origin_x, origin_y, board_path, outline
+            (vertex array), and layers (active copper layer names)
         """
         bridge = get_bridge()
         result = await bridge.send_command_async("project.get_board_info", {})

@@ -273,12 +273,57 @@ def register_application_tools(mcp):
         Detach also triggers save_all automatically, so you don't need this
         as the very last step.
 
+        CHECK ``still_dirty``, DO NOT ASSUME. Altium refuses to save while
+        a command is active in the editor and asks a human whether to
+        write a copy instead; DoFileSave does not raise when it declines.
+        MEASURED: this returned saved:true while every single save was
+        being refused. It now counts what is still modified afterwards,
+        and ``saved`` is false when anything is. If that happens, run
+        ``app_exit_active_command`` and retry.
+
         Returns:
-            Dictionary confirming save
+            Dict with ``saved``, ``still_dirty``, and a ``reason`` when
+            documents remain unsaved.
         """
         bridge = get_bridge()
         result = await bridge.send_command_async(
             "application.save_all", timeout=60.0
+        )
+        return result
+
+    @mcp.tool()
+    async def app_exit_active_command() -> dict[str, Any]:
+        """Close a transaction a crashed handler left open in Altium.
+
+        THE TOOL FOR "A command is currently active and save cannot be
+        completed at this time". While that state is set, EVERY save is
+        refused and the editor asks whether to write a copy instead.
+
+        IT SURVIVES RESTARTING THE POLLING LOOP, because the state lives
+        in Altium's PCB server rather than in the script, and Escape in
+        the editor does not clear it either. MEASURED on 2026-08-25:
+        saves were being refused on a brand-new library, and the state
+        had been left hours earlier by ``lib_link_3d_model`` faulting
+        between PreProcess and PostProcess on an undeclared identifier.
+        It outlived several restarts.
+
+        Every PreProcess in this bridge is paired, including on its error
+        paths, so this is not routine cleanup: it is recovery from a
+        handler that DIED mid-transaction. AltiumScriptCentral ships the
+        same one-line remedy as ExitActiveCommand.vbs.
+
+        Calling it when nothing is outstanding is harmless.
+
+        It saves nothing by itself. Run ``app_save_all`` afterwards and
+        check ``still_dirty``.
+
+        Returns:
+            Dict reporting whether each server accepted the unwind, plus
+            the count of still-modified documents before and after.
+        """
+        bridge = get_bridge()
+        result = await bridge.send_command_async(
+            "application.exit_active_command", timeout=30.0
         )
         return result
 

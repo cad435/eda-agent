@@ -151,6 +151,23 @@ Begin
     Result := '"' + EscapeJsonString(Name) + '":"' + EscapeJsonString(Value) + '"';
 End;
 
+{ AddFailReason - accumulate ONE per-item failure into a JSON array body.     }
+{                                                                             }
+{ The batch handlers used to answer a partly-failed run with nothing but a    }
+{ count, so a caller was told "failed: 1" and given no way to find out which  }
+{ item or why. Measured: lib_batch_rename and lib_batch_set_params both       }
+{ refused a component that demonstrably existed, and the reply could not      }
+{ distinguish a malformed line from an unresolvable name.                     }
+{                                                                             }
+{ Acc is the array BODY, without the enclosing brackets, so a caller wraps it }
+{ with JsonRaw when emitting.                                                 }
+Procedure AddFailReason(Var Acc : String; Item : String; Reason : String);
+Begin
+    If Acc <> '' Then Acc := Acc + ',';
+    Acc := Acc + '{"item":"' + EscapeJsonString(Item)
+        + '","reason":"' + EscapeJsonString(Reason) + '"}';
+End;
+
 Function JsonInt(Name : String; Value : Integer) : String;
 Begin
     Result := '"' + EscapeJsonString(Name) + '":' + IntToStr(Value);

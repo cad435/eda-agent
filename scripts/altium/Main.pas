@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.08.21.3';
+    SCRIPT_VERSION = '2026.08.25.5';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -80,6 +80,11 @@ Var
     { Storing the reference here gives us a working "current target" the    }
     { primitive helpers can trust.                                           }
     LastCreatedLibComponent : ISch_Component;
+
+    { Re-entry guard for LookupLibComponent's last-resort reopen. A
+      reopen re-reads the document and the retry looks the name up
+      again; without this the retry could trigger another reopen. }
+    RefreshingLib : Boolean;
 
 {..............................................................................}
 { Initialise polling tunables to compile-time defaults. Called by the          }
@@ -533,6 +538,129 @@ Begin
         ProjectServerDoc := Client.GetDocumentByPath(Project.DM_ProjectFullPath);
         If (ProjectServerDoc <> Nil) And ProjectServerDoc.Modified Then
             Try ProjectServerDoc.DoFileSave(''); Except End;
+    Except End;
+End;
+
+{ CountDirtyInProject / CountDirtyDocuments - how many documents are STILL     }
+{ unsaved. The only way to tell a save that worked from one Altium refused.    }
+{                                                                              }
+{ MEASURED on AD26: app_save_all returned saved:true while Altium was raising  }
+{ "A command is currently active and save cannot be completed at this time"    }
+{ once per dirty document. Every one of those saves was declined, and the tool }
+{ still reported success, because it only checked that SaveAllDirty had not    }
+{ raised. DoFileSave does not raise when the editor refuses.                   }
+Function CountDirtyInProject(Project : IProject) : Integer;
+Var
+    J : Integer;
+    Doc : IDocument;
+    ServerDoc : IServerDocument;
+Begin
+    Result := 0;
+    If Project = Nil Then Exit;
+    For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(J);
+        If Doc <> Nil Then
+        Begin
+            Try
+                ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
+                If (ServerDoc <> Nil) And ServerDoc.Modified Then
+                    Result := Result + 1;
+            Except End;
+        End;
+    End;
+End;
+
+Function CountDirtyDocuments : Integer;
+Var
+    Workspace : IWorkspace;
+    I : Integer;
+Begin
+    Result := 0;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+        Result := Result + CountDirtyInProject(Workspace.DM_Projects(I));
+    Try
+        Result := Result + CountDirtyInProject(Workspace.DM_FreeDocumentsProject);
+    Except End;
+End;
+
+{ ResolveLoadedDocPath - turn a bare document name into an ABSOLUTE path.     }
+{                                                                             }
+{ DM_FullPath AND DocumentName BOTH RETURN A BARE BASENAME for a free         }
+{ document, one that is open but not a member of any project. Anything that   }
+{ feeds that string to WorkspaceManager:OpenObject / CloseObject, or to        }
+{ CreateLibCompInfoReader, gets a silent no-op or a reader for the wrong      }
+{ file, because those all want a real path.                                   }
+{                                                                             }
+{ MEASURED: app_get_active_document and lib_get_component_details both        }
+{ reported "SWEEP_A.SchLib" for a document whose actual path is under the     }
+{ scratch directory, while the same call given an explicit library_path       }
+{ reported the full path. A reopen built on the basename did nothing at all   }
+{ and the failure looked like a lookup bug.                                   }
+{                                                                             }
+{ Returns '' when no absolute path can be found, so a caller can REFUSE       }
+{ rather than proceed with a string that will quietly do nothing.             }
+Function LooksAbsolutePath(P : String) : Boolean;
+Begin
+    Result := (Copy(P, 2, 1) = ':') Or (Copy(P, 1, 2) = '\\');
+End;
+
+Function MatchDocPathInProject(Project : IProject; Wanted : String) : String;
+Var
+    J : Integer;
+    Doc : IDocument;
+    Full : String;
+Begin
+    Result := '';
+    If Project = Nil Then Exit;
+    For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+    Begin
+        Doc := Project.DM_LogicalDocuments(J);
+        If Doc <> Nil Then
+        Begin
+            Full := '';
+            Try Full := Doc.DM_FullPath; Except End;
+            If LooksAbsolutePath(Full)
+                And (UpperCase(ExtractFileName(Full)) = UpperCase(Wanted)) Then
+            Begin
+                Result := Full;
+                Exit;
+            End;
+        End;
+    End;
+End;
+
+Function ResolveLoadedDocPath(NameOrPath : String) : String;
+Var
+    Workspace : IWorkspace;
+    Wanted : String;
+    I : Integer;
+Begin
+    Result := '';
+    If NameOrPath = '' Then Exit;
+    If LooksAbsolutePath(NameOrPath) Then
+    Begin
+        Result := NameOrPath;
+        Exit;
+    End;
+
+    Wanted := ExtractFileName(NameOrPath);
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Result := MatchDocPathInProject(Workspace.DM_Projects(I), Wanted);
+        If Result <> '' Then Exit;
+    End;
+
+    { Free documents live in the synthetic FreeDocumentsProject, and they are }
+    { precisely the ones that report a basename, so this is the branch that   }
+    { usually answers.                                                        }
+    Try
+        Result := MatchDocPathInProject(Workspace.DM_FreeDocumentsProject, Wanted);
     Except End;
 End;
 

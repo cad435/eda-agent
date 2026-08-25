@@ -4,6 +4,30 @@
 { Project.pas - Project management functions for the Altium integration bridge                }
 {..............................................................................}
 
+{ FocusedProjectPathIs - is the named project the one tools will default to?  }
+{                                                                             }
+{ Every handler here that takes an optional project_path falls back to        }
+{ DM_FocusedProject, and so does app_create_document when it attaches a new   }
+{ file. Opening or creating a project does NOT make it focused, because       }
+{ Altium's focused project follows the focused document. Callers assumed      }
+{ otherwise, so the create and open replies now state it outright.            }
+Function FocusedProjectPathIs(ProjectPath : String) : Boolean;
+Var
+    Workspace : IWorkspace;
+    Focused : IProject;
+    FocusedPath : String;
+Begin
+    Result := False;
+    If ProjectPath = '' Then Exit;
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    Focused := Workspace.DM_FocusedProject;
+    If Focused = Nil Then Exit;
+    FocusedPath := '';
+    Try FocusedPath := Focused.DM_ProjectFullPath; Except End;
+    Result := UpperCase(FocusedPath) = UpperCase(ProjectPath);
+End;
+
 Function FindProjectByPath(Workspace : IWorkspace; ProjectPath : String) : IProject;
 Var
     I : Integer;
@@ -88,9 +112,23 @@ Begin
     AddStringParameter('FileName', ProjectPath);
     RunProcess('WorkspaceManager:OpenObject');
 
+    { SAY WHETHER IT IS FOCUSED, because it usually is not, and the next      }
+    { call the caller makes probably assumes it is. Altium's focused project  }
+    { follows the focused DOCUMENT, and a project just created has none, so   }
+    { there is nothing to focus onto and no API to force it.                  }
+    {                                                                          }
+    { Why this matters more than it looks: app_create_document defaults to    }
+    { add_to_project=True and attaches to the FOCUSED project. Create a       }
+    { project, add a document, and the document lands in whatever was open    }
+    { before, which during the live sweep was a client design.                }
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"project_path":"' + EscapeJsonString(ProjectPath) +
-        '","saved":true}');
+        '","saved":true,"focused":'
+        + BoolToJsonStr(FocusedProjectPathIs(ProjectPath))
+        + ',"note":"a new project has no documents, so it cannot become the '
+        + 'focused project. Pass project_path explicitly to proj_add_document, '
+        + 'or activate one of its documents first: tools that default to the '
+        + 'focused project will otherwise act on a different one."}');
 End;
 
 Function Proj_Open(Params : String; RequestId : String) : String;
@@ -104,7 +142,16 @@ Begin
     AddStringParameter('FileName', ProjectPath);
     RunProcess('WorkspaceManager:OpenObject');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true}');
+    { Opening an ALREADY-OPEN project is a no-op that changes no focus, and   }
+    { this used to return a bare success, so a caller could not tell whether  }
+    { the project it named is the one subsequent calls will act on.           }
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"project_path":"' + EscapeJsonString(ProjectPath) + '"'
+        + ',"focused":' + BoolToJsonStr(FocusedProjectPathIs(ProjectPath))
+        + ',"note":"focus follows the active DOCUMENT, not this call. If '
+        + 'focused is false, activate one of the project''s documents with '
+        + 'app_set_active_document before using tools that default to the '
+        + 'focused project."}');
 End;
 
 Function Proj_Save(Params : String; RequestId : String) : String;
@@ -125,8 +172,15 @@ Begin
 
         If Project <> Nil Then
         Begin
-            RunProcess('WorkspaceManager:SaveAll');
-            Result := BuildSuccessResponse(RequestId, '{"success":true}');
+            { Only THIS project. The workspace-wide SaveAll that used to be   }
+            { here ignored project_path completely, so asking to save a       }
+            { scratch project wrote every dirty document in the workspace,    }
+            { client projects included. app_save_all is the tool for that,    }
+            { and its name says so.                                           }
+            SaveProjectMembers(Project);
+            Result := BuildSuccessResponse(RequestId,
+                '{"success":true,"project_path":"'
+                + EscapeJsonString(Project.DM_ProjectFullPath) + '"}');
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -135,10 +189,23 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
 End;
 
+{ Close ONE project, saving only ITS documents, and report whether the       }
+{ project actually went away.                                                 }
+{                                                                             }
+{ This used to run WorkspaceManager:SaveAll, which is workspace-wide. Called  }
+{ with an explicit project_path for a scratch project, it raised an Unsaved   }
+{ Changes prompt for a CLIENT project with 17 documents that the caller had   }
+{ never named. Answering that prompt would have written, and then closed,     }
+{ somebody else's work. SaveProjectMembers touches only the target.           }
+{                                                                             }
+{ It also returned success unconditionally. When the prompt was cancelled the }
+{ project stayed open and the reply still said success, so a caller could not }
+{ tell a completed close from an abandoned one. The close is now confirmed by }
+{ looking the project up again.                                               }
 Function Proj_Close(Params : String; RequestId : String) : String;
 Var
     ProjectPath : String;
-    SaveFirst : Boolean;
+    SaveFirst, Closed : Boolean;
     Workspace : IWorkspace;
     Project : IProject;
 Begin
@@ -157,13 +224,27 @@ Begin
         Begin
             ProjectPath := Project.DM_ProjectFullPath;
             If SaveFirst Then
-                RunProcess('WorkspaceManager:SaveAll');
+                SaveProjectMembers(Project);
 
             ResetParameters;
             AddStringParameter('ObjectKind', 'Project');
             AddStringParameter('FileName', ProjectPath);
             RunProcess('WorkspaceManager:CloseObject');
-            Result := BuildSuccessResponse(RequestId, '{"success":true}');
+
+            { Confirm. A cancelled save prompt aborts the close, and the      }
+            { process layer cannot report that.                               }
+            Closed := FindProjectByPath(Workspace, ProjectPath) = Nil;
+            If Closed Then
+                Result := BuildSuccessResponse(RequestId,
+                    '{"success":true,"closed":true,"project_path":"'
+                    + EscapeJsonString(ProjectPath) + '"}')
+            Else
+                Result := BuildSuccessResponse(RequestId,
+                    '{"success":false,"closed":false,"project_path":"'
+                    + EscapeJsonString(ProjectPath) + '"'
+                    + ',"reason":"the project is still open after the close '
+                    + 'was issued, which is what happens when a save prompt '
+                    + 'is cancelled or a document refuses to close"}');
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -246,11 +327,25 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
 End;
 
+{ Remove a document FROM A PROJECT. It does not delete the file.             }
+{                                                                             }
+{ This used to run WorkspaceManager:CloseObject on the document, which closes }
+{ the editor WINDOW and leaves project membership untouched. Measured: the    }
+{ call reported success, raised an Unsaved Changes prompt, and the .PrjPcb    }
+{ still carried the DocumentPath afterwards. The right call is the mirror of  }
+{ the one Proj_AddDocument uses, DM_RemoveSourceDocument, and it is confirmed }
+{ by three independent scripts in reference/.                                 }
+{                                                                             }
+{ Membership is re-read afterwards, because the removal is the whole point of }
+{ the tool and "I issued it" is not the same as "it happened".                }
 Function Proj_RemoveDocument(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, DocumentPath : String;
+    ProjectPath, DocumentPath, DocPath : String;
     Workspace : IWorkspace;
     Project : IProject;
+    Doc : IDocument;
+    I : Integer;
+    StillMember, WasMember : Boolean;
 Begin
     ProjectPath := ExtractJsonValue(Params, 'project_path');
     DocumentPath := ExtractJsonValue(Params, 'document_path');
@@ -265,11 +360,45 @@ Begin
 
         If Project <> Nil Then
         Begin
-            ResetParameters;
-            AddStringParameter('ObjectKind', 'Document');
-            AddStringParameter('FileName', DocumentPath);
-            RunProcess('WorkspaceManager:CloseObject');
-            Result := BuildSuccessResponse(RequestId, '{"success":true}');
+            { Was it ever a member? Removing something that was never there   }
+            { must not read the same as a successful removal.                 }
+            WasMember := False;
+            For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+            Begin
+                DocPath := '';
+                Doc := Project.DM_LogicalDocuments(I);
+                If Doc <> Nil Then Try DocPath := Doc.DM_FullPath; Except End;
+                If UpperCase(DocPath) = UpperCase(DocumentPath) Then
+                    WasMember := True;
+            End;
+
+            If Not WasMember Then
+                Result := BuildErrorResponse(RequestId, 'NOT_A_MEMBER',
+                    'That document is not in this project: ' + DocumentPath)
+            Else
+            Begin
+                Try Project.DM_RemoveSourceDocument(DocumentPath); Except End;
+
+                StillMember := False;
+                For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
+                Begin
+                    DocPath := '';
+                    Doc := Project.DM_LogicalDocuments(I);
+                    If Doc <> Nil Then Try DocPath := Doc.DM_FullPath; Except End;
+                    If UpperCase(DocPath) = UpperCase(DocumentPath) Then
+                        StillMember := True;
+                End;
+
+                If StillMember Then
+                    Result := BuildSuccessResponse(RequestId,
+                        '{"success":false,"removed":false,"reason":"the '
+                        + 'document is still a member of the project after '
+                        + 'DM_RemoveSourceDocument was called"}')
+                Else
+                    Result := BuildSuccessResponse(RequestId,
+                        '{"success":true,"removed":true,"document_path":"'
+                        + EscapeJsonString(DocumentPath) + '"}');
+            End;
         End
         Else
             Result := BuildErrorResponse(RequestId, 'PROJECT_NOT_FOUND', 'Project not found');
@@ -317,14 +446,29 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace available');
 End;
 
+{ Set a project-level parameter, and prove it took.                          }
+{                                                                             }
+{ The add path used to be WorkspaceManager:DocumentAddParameter. Measured on  }
+{ AD26: it writes nothing. The parameter was absent from DM_Parameters and    }
+{ absent from the saved .PrjPcb, while the tool returned success with the     }
+{ name and value ECHOED BACK, which reads exactly like a confirmation.        }
+{                                                                             }
+{ That process name could not be corroborated: the only occurrence of it in   }
+{ reference/ is CoAltium, a vendored copy of THIS project, so the citation    }
+{ was circular. The real API is DM_AddParameter inside DM_BeginUpdate /       }
+{ DM_EndUpdate, used twice by an independent script in                        }
+{ reference/altium-delphiscripts-brett/Project/Prj-Parameters.pas.            }
+{                                                                             }
+{ Both paths are now followed by a re-read of DM_Parameters, and the reply    }
+{ carries what was READ, not what was asked for.                              }
 Function Proj_SetParameter(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, ParamName, ParamValue : String;
+    ProjectPath, ParamName, ParamValue, ReadBack : String;
     Workspace : IWorkspace;
     Project : IProject;
     Param : IParameter;
     I : Integer;
-    Found : Boolean;
+    Found, Verified : Boolean;
 Begin
     ParamName := ExtractJsonValue(Params, 'name');
     ParamValue := ExtractJsonValue(Params, 'value');
@@ -356,36 +500,59 @@ Begin
 
     ProjectPath := Project.DM_ProjectFullPath;
 
-    { Try to find and update existing parameter }
+    { Update in place if it is already there. }
     Found := False;
+    Project.DM_BeginUpdate;
+    Try
+        For I := 0 To Project.DM_ParameterCount - 1 Do
+        Begin
+            Param := Project.DM_Parameters(I);
+            If Param.DM_Name = ParamName Then
+            Begin
+                Param.DM_Value := ParamValue;
+                Found := True;
+                Break;
+            End;
+        End;
+
+        If Not Found Then
+            Try Project.DM_AddParameter(ParamName, ParamValue); Except End;
+    Finally
+        Project.DM_EndUpdate;
+    End;
+
+    { Persist, then READ IT BACK. }
+    SaveProjectMembers(Project);
+
+    Verified := False;
+    ReadBack := '';
     For I := 0 To Project.DM_ParameterCount - 1 Do
     Begin
         Param := Project.DM_Parameters(I);
-        If Param.DM_Name = ParamName Then
+        If (Param <> Nil) And (Param.DM_Name = ParamName) Then
         Begin
-            Param.DM_Value := ParamValue;
-            Found := True;
+            Try ReadBack := Param.DM_Value; Except End;
+            Verified := ReadBack = ParamValue;
             Break;
         End;
     End;
 
-    { If not found, add via RunProcess }
-    If Not Found Then
-    Begin
-        ResetParameters;
-        AddStringParameter('ObjectKind', 'Project');
-        AddStringParameter('Name', ParamName);
-        AddStringParameter('Value', ParamValue);
-        RunProcess('WorkspaceManager:DocumentAddParameter');
-    End;
-
-    { Save the project to persist changes }
-    ResetParameters;
-    AddStringParameter('ObjectKind', 'Project');
-    AddStringParameter('FileName', ProjectPath);
-    RunProcess('WorkspaceManager:SaveObject');
-
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"name":"' + EscapeJsonString(ParamName) + '","value":"' + EscapeJsonString(ParamValue) + '","project_path":"' + EscapeJsonString(ProjectPath) + '"}');
+    If Verified Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":true,"name":"' + EscapeJsonString(ParamName)
+            + '","value":"' + EscapeJsonString(ReadBack)
+            + '","created":' + BoolToJsonStr(Not Found)
+            + ',"verified":true,"project_path":"'
+            + EscapeJsonString(ProjectPath) + '"}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":false,"verified":false,"name":"'
+            + EscapeJsonString(ParamName)
+            + '","requested_value":"' + EscapeJsonString(ParamValue)
+            + '","read_back":"' + EscapeJsonString(ReadBack)
+            + '","reason":"the parameter did not read back with the '
+            + 'requested value after the write and save, so it was not '
+            + 'stored","project_path":"' + EscapeJsonString(ProjectPath) + '"}');
 End;
 
 Function Proj_Compile(Params : String; RequestId : String) : String;
@@ -1014,7 +1181,23 @@ Begin
     AddStringParameter('FileName', OutputPath);
     RunProcess('WorkspaceManager:Print');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"output_path":"' + EscapeJsonString(OutputPath) + '"}');
+    { The comment above has always admitted this opens a dialog, and the      }
+    { reply still claimed success with the path. Measured: the preview modal  }
+    { appeared, was dismissed, and the tool reported success for a PDF that   }
+    { was never written. Whether a human pressed Print is only knowable by    }
+    { looking for the file.                                                   }
+    If FileExists(OutputPath) Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":true,"written":true,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":false,"written":false,"output_path":"'
+            + EscapeJsonString(OutputPath) + '"'
+            + ',"reason":"the print dialog was opened but no file exists at '
+            + 'output_path, so the export was cancelled or never confirmed. '
+            + 'This path cannot run unattended: configure an OutJob and use '
+            + 'proj_run_outjob"}');
 End;
 
 {..............................................................................}
@@ -1317,7 +1500,7 @@ Var
     LayerStack : IPCB_LayerStack_V7;
     LayerObj : IPCB_LayerObject_V7;
     I, PtCount : Integer;
-    OutlineStr, LayerStr, Data : String;
+    OutlineStr, LayerStr, Data, BoardFile : String;
     First : Boolean;
 Begin
     Board := GetPCBBoardAnywhere;
@@ -1366,8 +1549,19 @@ Begin
     End;
     LayerStr := LayerStr + ']';
 
+    { NAME THE BOARD THAT ANSWERED. GetPCBBoardAnywhere deliberately finds   }
+    { any open board, so with a SCHEMATIC focused this happily returns some   }
+    { other document's geometry. MEASURED: with a schematic active and a      }
+    { two-document project focused, it reported an outline belonging to       }
+    { neither, and the reply carried nothing to reveal that. The board is     }
+    { now identified, so a caller can tell whether the answer is about the    }
+    { document they meant.                                                    }
+    BoardFile := '';
+    Try BoardFile := Board.FileName; Except End;
+
     Data := '{"origin_x":' + IntToStr(CoordToMils(Board.XOrigin));
     Data := Data + ',"origin_y":' + IntToStr(CoordToMils(Board.YOrigin));
+    Data := Data + ',"board_path":"' + EscapeJsonString(BoardFile) + '"';
     Data := Data + ',"outline":' + OutlineStr;
     Data := Data + ',"layers":' + LayerStr + '}';
     Result := BuildSuccessResponse(RequestId, Data);
@@ -1750,23 +1944,40 @@ End;
 { Generate manufacturing outputs from PCB                                    }
 {..............................................................................}
 
+{ Fire a PCB export process and REPORT WHETHER ANYTHING APPEARED.            }
+{                                                                             }
+{ This used to end with a flat generated-true and nothing else. Measured on   }
+{ AD26: a gerber export with an explicit output_path produced no directory    }
+{ and no files at all, and the caller was told it had been generated.         }
+{ Altium's exporters are dialog-driven and RunProcess cannot report what the  }
+{ dialog did, so the only honest signal is whether the output is on disk      }
+{ afterwards.                                                                 }
+{                                                                             }
+{ When no output_path is supplied there is nothing to look for, so the reply  }
+{ says dispatched rather than generated. Two different words for two          }
+{ different claims, which is the whole point.                                 }
 Function Proj_GenerateOutput(Params : String; RequestId : String) : String;
 Var
     OutputType, OutputPath : String;
+    ExpectDir, Appeared : Boolean;
 Begin
     OutputType := ExtractJsonValue(Params, 'output_type');
     OutputPath := ExtractJsonValue(Params, 'output_path');
 
     If OutputType = '' Then Begin Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'output_type is required'); Exit; End;
 
+    ExpectDir := False;
+
     If OutputType = 'gerber' Then
     Begin
+        ExpectDir := True;
         ResetParameters;
         If OutputPath <> '' Then AddStringParameter('OutputPath', OutputPath);
         RunProcess('PCB:GenericExport');
     End
     Else If OutputType = 'drill' Then
     Begin
+        ExpectDir := True;
         ResetParameters;
         If OutputPath <> '' Then AddStringParameter('OutputPath', OutputPath);
         RunProcess('PCB:ExportDrill');
@@ -1788,7 +1999,35 @@ Begin
         Exit;
     End;
 
-    Result := BuildSuccessResponse(RequestId, '{"generated":true,"output_type":"' + OutputType + '"}');
+    If OutputPath = '' Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true,"output_type":"' + OutputType + '"'
+            + ',"reason":"the export process was launched, but with no '
+            + 'output_path there is nothing to check, so whether a file was '
+            + 'written is unknown. Pass output_path, or drive an OutJob with '
+            + 'proj_run_outjob for a result that can be confirmed"}');
+        Exit;
+    End;
+
+    Appeared := False;
+    If ExpectDir Then
+        Try Appeared := DirectoryExists(OutputPath); Except End
+    Else
+        Try Appeared := FileExists(OutputPath); Except End;
+
+    If Appeared Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":true,"output_type":"' + OutputType + '"'
+            + ',"output_path":"' + EscapeJsonString(OutputPath) + '"}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            '{"generated":false,"dispatched":true,"output_type":"' + OutputType + '"'
+            + ',"output_path":"' + EscapeJsonString(OutputPath) + '"'
+            + ',"reason":"the export process was launched but nothing exists '
+            + 'at output_path afterwards. Altium''s exporters are '
+            + 'dialog-driven and cannot run unattended this way; configure an '
+            + 'OutJob and use proj_run_outjob"}');
 End;
 
 {..............................................................................}

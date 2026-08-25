@@ -44,6 +44,9 @@ _NO_HINT_NEEDED = {
     "WRONG_DOC_KIND": "already says to pass sheet_path",
     "WRONG_FOCUS": "already names the document to focus and the tool "
                    "that focuses it",
+    "NOT_A_MEMBER": "the project resolved fine and the document simply is "
+                    "not in it, so there is no other document to point at. "
+                    "The message names the path that was asked for.",
 }
 
 

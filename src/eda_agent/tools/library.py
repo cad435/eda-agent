@@ -1328,7 +1328,15 @@ def register_library_tools(mcp):
 
         Args:
             text: The string to place. Required.
-            x, y: Coordinates in mils, relative to the board origin.
+            x, y: Coordinates in mils, relative to the FOOTPRINT's origin,
+                which is what the handler has always actually done
+                (``Footprint.X + MilsToCoord(x)``). The old wording said
+                "board origin" and that was wrong: a PcbLib footprint sits
+                at Altium's library origin, 50000 mils out, so the two
+                readings differ by more than a metre. The pad, track and
+                arc tools wrote absolute board coordinates and produced
+                footprints whose geometry was nowhere near them; they now
+                match this one.
             size: Text height in mils. 50 is a common silkscreen size;
                 drop to 30-40 for tight footprints.
             width: Stroke width in mils. 8 reads cleanly at 50 mil
@@ -1951,21 +1959,31 @@ def register_library_tools(mcp):
                 This is the common adjustment: lifting a connector body
                 off the board so it sits on its pads rather than through
                 them.
-            rotation_x: NOT APPLIED. IPCB_ComponentBody exposes a PLANAR
-                Rotation only; the PCB API gives the model no X tilt, so
-                this is accepted for signature stability and ignored.
+            rotation_x: NOT APPLIED, accepted for signature stability.
                 Set it in the library editor after linking.
             rotation_y: NOT APPLIED, same reason as rotation_x.
-            rotation_z: Z rotation in degrees, sets the body's Rotation.
+            rotation_z: NOT APPLIED. This one used to assign
+                ``Body.Rotation``, and IPCB_ComponentBody has no such
+                property on AD26 26.9.1.9. MEASURED: it raised
+                "Undeclared identifier: Rotation", which DelphiScript
+                cannot catch, so the Try around it never fired and the
+                resulting modal took the whole polling loop down with
+                it. Passing a rotation used to cost you the bridge.
+                The rotation lives on the MODEL, not the body, and has
+                to be set before the model is attached
+                (``Model.SetState`` in AutoSTEPplacer.pas). Its four
+                arguments are undocumented, so they are not guessed at
+                here. Rotate in the library editor for now.
 
         Returns:
             Dict with ``success``, ``footprint``, ``model``, and
             ``applied`` -- which adjustments were actually written to
             the body (``standoff_height``, ``rotation_z``,
-            ``offset_xy``). Check it rather than assuming: these three
-            properties are documented but are exercised nowhere else in
-            this codebase, and each assignment is individually guarded,
-            so one failing does not fail the call.
+            ``offset_xy``). Check it rather than assuming: each
+            assignment is individually guarded, so one failing does not
+            fail the call. ``rotation_z`` is now ALWAYS false, see
+            above. ``standoff_height`` is confirmed live;
+            ``offset_xy`` is not yet.
 
             A ``false`` means the adjustment did not happen, which
             covers both a rejected assignment and an argument left at
@@ -2099,6 +2117,15 @@ def register_library_tools(mcp):
                 designator string (slow on large libraries; smaller
                 payload than with_parameters). Default False.
 
+        ``part_count`` HERE IS NOT TRUSTWORTHY. It comes from the
+        CompInfoReader, and MEASURED on AD26 it reported 2 for a symbol
+        created single-part whose every pin carries OwnerPartId 1, while
+        ``lib_get_component_details`` reported 1 for an identically
+        created symbol. The two readers disagree and only the
+        discrepancy is established, not a conversion between them, so
+        no correction is applied here rather than guess one. Use
+        ``lib_get_component_details`` when the part count matters.
+
         Returns:
             Dictionary with ``count`` and ``components`` list. Each
             component carries index, name, alias_name, part_count,
@@ -2142,6 +2169,14 @@ def register_library_tools(mcp):
         ``CreateLibCompInfoReader`` so the search is fast even with
         many libraries open: it only loads symbols when ``search_type``
         is ``"parameters"``.
+
+        IT READS THE FILE ON DISK, NOT THE EDITOR. A component created
+        in this session and not yet saved WILL NOT BE FOUND, and the
+        reply is an ordinary empty result with nothing to say why.
+        MEASURED: a symbol that ``lib_get_component_details`` returned
+        in full was absent here until a save. Save first, or use
+        ``lib_get_component_details`` / ``lib_get_pin_list``, which read
+        the live document.
 
         DATASHEET DISCIPLINE: Matches carry `_datasheet_guidance`.
         Before recommending any matched part as a replacement or
@@ -2714,7 +2749,13 @@ def register_library_tools(mcp):
         config.ensure_workspace()
         batch_path = config.workspace_dir / "batch_params.txt"
 
-        with open(batch_path, "w", encoding=encoding) as f:
+        # Windows would translate the newline into CR LF here. The
+        # Pascal reader splits on the newline and leaves the carriage
+        # return attached to the LAST field on the line, so a rename
+        # wrote a LibReference ending in CR and a parameter got a CR
+        # in its value. The Pascal side trims as well; both, because
+        # either alone leaves the other half of the contract unstated.
+        with open(batch_path, "w", encoding=encoding, newline="") as f:
             for a in assignments:
                 f.write(f"{a['component_name']}|{a['param_name']}|{a['param_value']}\n")
 
@@ -2779,7 +2820,13 @@ def register_library_tools(mcp):
         config.ensure_workspace()
         batch_path = config.workspace_dir / "batch_rename.txt"
 
-        with open(batch_path, "w", encoding=encoding) as f:
+        # Windows would translate the newline into CR LF here. The
+        # Pascal reader splits on the newline and leaves the carriage
+        # return attached to the LAST field on the line, so a rename
+        # wrote a LibReference ending in CR and a parameter got a CR
+        # in its value. The Pascal side trims as well; both, because
+        # either alone leaves the other half of the contract unstated.
+        with open(batch_path, "w", encoding=encoding, newline="") as f:
             for a in assignments:
                 f.write(f"{a['old_name']}|{a['new_name']}\n")
 

@@ -176,6 +176,19 @@ INTERACTION_OVERRIDES = {
     # answer, and anyone filtering for operations that keep the session
     # responsive must not be handed this one.
     "app_update_from_libraries": MODAL,
+    # MEASURED MODAL during the live sweep of 2026-08-24. Each of these was
+    # published as silent, so anything filtering for "keeps the session
+    # responsive" was handed a tool that blocks the bridge until a human
+    # answers a dialog. The dialog seen is named beside each one.
+    "pcb_run_drc": MODAL,             # Design Rule Checker (TDesignRuleCheckForm)
+    "proj_export_pdf": MODAL,         # Preview PCB / print preview
+    "proj_run_output": MODAL,         # Altium's exporter dialogs
+    # These three raise "Unsaved Changes" whenever the target is dirty, and
+    # that one is a WPF dialog whose buttons expose no window handles, so
+    # app_press_dialog_button cannot answer it. Keyboard only.
+    "lib_reload_library": MODAL,
+    "proj_remove_document": MODAL,
+    "proj_close": MODAL,
     # Succeeds but leaves the job incomplete.
     "pcb_place_components": PARTIAL,  # geometry only; needs pcb_build_from_project for nets
     # "diff" homograph: _READONLY_SUBSTRINGS carries "_diff_" for
