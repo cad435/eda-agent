@@ -5284,7 +5284,7 @@ Var
     Workspace : IWorkspace;
     Doc : IDocument;
     SourceLib, DestLib : ISch_Lib;
-    SourceComp, NewComp, Existing : ISch_Component;
+    SourceComp, NewComp, Existing, Verify : ISch_Component;
     Overwrite, SameLib, Overwrote : Boolean;
 Begin
     SourceLibPath := ExtractJsonValue(Params, 'source_library');
@@ -5393,9 +5393,41 @@ Begin
 
     SchServer.ProcessControl.PreProcess(DestLib, '');
     DestLib.AddSchComponent(NewComp);
+    { RE-ASSERT THE NAME. AddSchComponent overrides LibReference with an   }
+    { auto-generated Component_<N> on the second and later additions to a  }
+    { SchLib in one session, so the assignment made before the add does    }
+    { not survive it. Lib_CreateSymbol hit this and re-asserts for exactly }
+    { the same reason; the copy path did not, so the clone landed under an }
+    { auto name and every later lookup of new_name missed it.              }
+    NewComp.LibReference := NewName;
     SchServer.ProcessControl.PostProcess(DestLib, 'Edit');
     DestLib.CurrentSchComponent := NewComp;
+    LastCreatedLibComponent := NewComp;
+    LastCreatedLibComponentName := NewName;
+    Try DestLib.GraphicallyInvalidate; Except End;
     MarkLibDirty(DestLib);
+
+    { VERIFY, rather than reporting the issuing of the work. Measured on   }
+    { AD26 at script 2026.08.25.6: this returned success:true while the    }
+    { component count stayed flat and new_name resolved nowhere.           }
+    Verify := Nil;
+    Try Verify := LookupLibComponent(DestLib, NewName); Except End;
+    If Verify = Nil Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', False) + ',' +
+                JsonStr('source_library', SourceLibPath) + ',' +
+                JsonStr('dest_library', DestLibPath) + ',' +
+                JsonStr('source', SourceName) + ',' +
+                JsonStr('new_name', NewName) + ',' +
+                JsonStr('reason', 'the copy was added but does not resolve '
+                    + 'in the destination library afterwards, so nothing '
+                    + 'was written under that name. Read the library back '
+                    + 'before relying on this having worked.')
+            ));
+        Exit;
+    End;
 
     { Stash the response in a local before assigning to Result -- the         }
     { DelphiScript last-String-arg clobber bug only bites here when the       }
@@ -5407,7 +5439,8 @@ Begin
         ',"source":"' + EscapeJsonString(SourceName) + '"' +
         ',"new_name":"' + EscapeJsonString(NewName) + '"' +
         ',"same_library":' + BoolToJsonStr(SameLib) +
-        ',"overwrote":' + BoolToJsonStr(Overwrote) + '}';
+        ',"overwrote":' + BoolToJsonStr(Overwrote) +
+        ',"verified":true}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
@@ -7294,16 +7327,46 @@ Begin
         SchLib.RemoveSchComponent(Component);
         Component.LibReference := NewName;
         SchLib.AddSchComponent(Component);
+        { RE-ASSERT AFTER THE ADD. AddSchComponent overrides LibReference }
+        { with an auto-generated Component_<N> on the second and later    }
+        { additions to a SchLib in one session, so setting it before the  }
+        { add is not enough and the rename lands on a name nobody asked   }
+        { for. Lib_CreateSymbol carries the same re-assertion.            }
+        Component.LibReference := NewName;
     Finally
         SchServer.ProcessControl.PostProcess(SchLib, 'Rename component');
     End;
     SchLib.GraphicallyInvalidate;
+    LastCreatedLibComponent := Component;
+    LastCreatedLibComponentName := NewName;
     MarkLibDirty(SchLib);
+
+    { VERIFY BOTH DIRECTIONS. A rename is only done if the new name       }
+    { resolves AND the old one no longer does; checking just the first    }
+    { would pass a copy, and checking neither is what reported success    }
+    { while the old name was still sitting in the library.                }
+    Existing := Nil;
+    Try Existing := LookupLibComponent(SchLib, NewName); Except End;
+    If Existing = Nil Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', False) + ',' +
+                JsonStr('library_path', LibPath) + ',' +
+                JsonStr('old_name', OldName) + ',' +
+                JsonStr('new_name', NewName) + ',' +
+                JsonStr('reason', 'the component does not resolve under '
+                    + 'new_name after the rename, so the library still '
+                    + 'holds whatever it held before.')
+            ));
+        Exit;
+    End;
 
     RespJson :=
         '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"' +
         ',"old_name":"' + EscapeJsonString(OldName) + '"' +
-        ',"new_name":"' + EscapeJsonString(NewName) + '"}';
+        ',"new_name":"' + EscapeJsonString(NewName) + '"' +
+        ',"verified":true}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
