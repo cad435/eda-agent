@@ -335,6 +335,13 @@ Begin
         End;
     Except End;
 
+    { The close below frees every component in this document, so the      }
+    { reference held from creation stops pointing at anything. Dropping   }
+    { it here is what keeps LookupLibComponent from handing a caller a    }
+    { component that no longer exists.                                    }
+    LastCreatedLibComponent := Nil;
+    LastCreatedLibComponentName := '';
+
     ResetParameters;
     AddStringParameter('ObjectKind', 'Document');
     AddStringParameter('FileName', LibPath);
@@ -377,15 +384,14 @@ Begin
     {                                                                         }
     { Checked BEFORE the reopen because it costs nothing and does not disturb }
     { the editor, where a reopen changes focus and the current component.     }
-    If LastCreatedLibComponent <> Nil Then
+    { The name is compared against the one recorded at the time, NOT read }
+    { back off the interface. See LastCreatedLibComponentName in Main for }
+    { what a property read on a freed component does to the session.      }
+    If (LastCreatedLibComponent <> Nil) And
+       (LastCreatedLibComponentName = Name) Then
     Begin
-        LibPath := '';
-        Try LibPath := LastCreatedLibComponent.LibReference; Except End;
-        If LibPath = Name Then
-        Begin
-            Result := LastCreatedLibComponent;
-            Exit;
-        End;
+        Result := LastCreatedLibComponent;
+        Exit;
     End;
 
     { Last resort: the document has not caught up with its own contents. }
@@ -482,6 +488,7 @@ Begin
 
         SchLib.CurrentSchComponent := Component;
         LastCreatedLibComponent := Component;
+        LastCreatedLibComponentName := Name;
 
         // Refresh the library editor view so the new component is visible.
         Try SchLib.GraphicallyInvalidate; Except End;
@@ -630,6 +637,7 @@ Begin
 
     SchLib.CurrentSchComponent := Component;
     LastCreatedLibComponent := Component;
+    LastCreatedLibComponentName := Name;
 
     { Reset PartID + DisplayMode so subsequent Lib_AddSymbol* calls write     }
     { their primitives onto a VISIBLE normal-mode part. Without this, after a }

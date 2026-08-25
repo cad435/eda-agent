@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.08.25.5';
+    SCRIPT_VERSION = '2026.08.25.6';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -80,6 +80,29 @@ Var
     { Storing the reference here gives us a working "current target" the    }
     { primitive helpers can trust.                                           }
     LastCreatedLibComponent : ISch_Component;
+
+    { The name that reference was known by, recorded when it was set.
+
+      ASKING THE COMPONENT ITS OWN NAME IS NOT AN OPTION HERE.
+      Measured on AD26: reading LibReference off THIS global raised
+      "Undeclared identifier: LibReference", and the modal took the
+      polling loop with it because undeclared identifiers are not
+      catchable and the Try/Except around it did nothing. One caller sat
+      on that dialog for over two minutes.
+
+      The property itself is fine. ScanLibForComponent reads it off
+      every component it walks, ten lines earlier in the same lookup,
+      and has always worked. What differs is the reference: this one is
+      held ACROSS commands, and the document it belongs to may have been
+      closed, reopened or re-imported since. A member read on a
+      component that no longer exists is reported as an undeclared
+      identifier rather than as a missing object, which is why it reads
+      as an API error and is not one.
+
+      So the reference is cleared whenever this script reopens the
+      library, and the name is compared against this recorded string
+      rather than against anything read back off the component. }
+    LastCreatedLibComponentName : String;
 
     { Re-entry guard for LookupLibComponent's last-resort reopen. A
       reopen re-reads the document and the retry looks the name up
