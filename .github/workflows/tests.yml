@@ -128,8 +128,20 @@ jobs:
       #
       # --durations names what the time is being spent on. The suite is
       # thousands of tests and a single slow one is invisible in a total.
+      # -rs NAMES EVERY SKIP AND WHY.
+      #
+      # A skip is green, and a count is not a reason. This suite skips
+      # 119 tests on a CI runner and 9 on a developer machine, so 110 of
+      # them are decided by what the runner does not have, and nothing
+      # in the log said which or why.
+      #
+      # That is exactly how the Pascal cross-validation sat unrun for
+      # its whole life: `choco install` succeeded, fpc was not on the
+      # PATH later steps saw, 37 tests skipped themselves, and the run
+      # was green. The count was in the log the entire time and told
+      # nobody anything.
       - name: Run test suite
         run: >
-          python -m pytest tests/ -q
+          python -m pytest tests/ -q -rs
           --ignore=tests/test_cross_validate.py
           --durations=25
