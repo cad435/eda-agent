@@ -24,6 +24,7 @@ works elsewhere cannot be an undeclared identifier:
 | 4, DNP paste | `PasteMaskExpansion` | yes, `PCB_MakePasteGrid` | low, but it edits the board |
 | 3, filled body | `AreaColor`, `IsSolid` | yes, `Generic.pas` | low |
 | 5, 3D placement | `MoveByXY` | yes, `PCB_ReplicateLayout` | low |
+| 11, copy and rename | `LibReference` | yes, `Lib_CreateSymbol` | low |
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
