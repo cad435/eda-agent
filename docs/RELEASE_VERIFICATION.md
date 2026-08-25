@@ -1,4 +1,4 @@
-# Release verification: 2026.08.25.5
+# Release verification: 2026.08.25.7
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -127,7 +127,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.25.5`, `version_match` =
+Expect `altium_script_version` = `2026.08.25.7`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -547,6 +547,43 @@ must keep working unchanged, which step 9's queries already exercise.
 
 `tests/test_no_double_unescape.py` pins the site count at zero from
 now on, so this is a one-time verification, not a recurring step.
+
+## 11. Copy and rename actually change the library
+
+Reported against the previous script build: `lib_copy_component` and
+`lib_rename_component` both answered `success:true` while the component
+count did not move, the copy's `new_name` resolved nowhere, and the
+renamed part was still there under its old name.
+
+`AddSchComponent` overrides `LibReference` with an auto-generated
+`Component_<N>` on the second and later additions to a SchLib in one
+session, so an assignment made before the add does not survive it.
+`Lib_CreateSymbol` already re-asserts after the add for this reason;
+these two did not. No new identifiers are involved, so the compile risk
+is nil, and what needs proving is the behaviour.
+
+On a scratch library, with a symbol that is not the first added this
+session:
+
+    lib_copy_component    source_name <existing>  new_name COPY_PROBE
+    lib_get_components    library_path <the same library>
+
+`COPY_PROBE` must appear, and the count must be one higher. Then:
+
+    lib_rename_component  component_name COPY_PROBE  new_name RENAME_PROBE
+    lib_get_components    library_path <the same library>
+
+`RENAME_PROBE` must appear, `COPY_PROBE` must be gone, and the count
+must be unchanged. Both replies now carry `verified:true`; a reply with
+`success:false` and a `reason` is the handler reporting that the
+read-back missed, which is the state that used to be reported as
+success.
+
+Note that `part_count` from `lib_get_components` is not evidence of
+anything here. It comes from the CompInfoReader, which has been measured
+reporting 2 for a symbol created single-part whose every pin carries
+`OwnerPartId 1`, while `lib_get_component_details` reported 1 for an
+identically created symbol.
 
 ---
 
