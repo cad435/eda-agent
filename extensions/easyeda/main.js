@@ -3891,6 +3891,34 @@ async function dispatch(raw) {
     return;
   }
 
+  // A SERVER THAT IS NOT OURS, ANSWERING ON A PORT WE SCANNED.
+  //
+  // The fallback discovery path has no /health check: with no fetch in
+  // the runtime it opens a WebSocket to each candidate port and keeps
+  // whichever connects. EasyEDA's own bridge server listens on the same
+  // ten ports and the same /eda path, so that path can attach to it,
+  // and nothing downstream would notice. Its handshake carries no
+  // `command`, so it used to be dropped here in silence while the
+  // extension stayed attached and reported itself connected. Every
+  // later command would then go to a server speaking a different
+  // protocol.
+  //
+  // It announces itself on connect, which is the opening this uses:
+  // {type: "handshake", service: "easyeda-bridge"}. Any service that
+  // names itself and is not us gets the socket closed, so the retry
+  // loop moves on to the next port instead of settling on the wrong
+  // server.
+  if (request && request.service && request.service !== SERVICE_ID) {
+    connected = false;
+    noteOutcome(
+      `port answered, but it is ${request.service}, not ${SERVICE_ID}`,
+    );
+    try {
+      eda.sys_WebSocket.close(WS_ID);
+    } catch (e) { /* it is going away regardless */ }
+    return;
+  }
+
   const { id, command, params } = request || {};
   if (!id || !command) return;
 
@@ -4537,19 +4565,31 @@ export function status() {
       );
       return;
     }
-    const builds = seen.editor_builds || [];
-    const mine = builds.indexOf(BUILD_ID) !== -1;
-    toast(
-      [
-        `server on ${seen.port}: editor ${seen.editor_connected ? 'CONNECTED' : 'not connected'}`,
-        builds.length
-          ? `builds holding sockets: ${builds.join(', ')}`
-          : 'no build has identified itself yet',
-        mine
+    // ABSENT IS NOT EMPTY. A server older than this field answers
+    // without editor_builds at all, and treating that as "no builds
+    // are connected" turns a question nobody asked into a confident
+    // wrong answer: it would report this build as not holding a socket
+    // when the server simply never said. Read nothing and nothing
+    // there have to stay distinguishable.
+    const lines = [
+      `server on ${seen.port}: editor ${seen.editor_connected ? 'CONNECTED' : 'not connected'}`,
+    ];
+    if (!Array.isArray(seen.editor_builds)) {
+      lines.push(
+        'that server does not report which builds hold sockets,',
+        'so whether this one does is unknown. Restart the server.',
+      );
+    } else if (seen.editor_builds.length === 0) {
+      lines.push('no build has identified itself to it yet');
+    } else {
+      lines.push(`builds holding sockets: ${seen.editor_builds.join(', ')}`);
+      lines.push(
+        seen.editor_builds.indexOf(BUILD_ID) !== -1
           ? 'one of them is this build'
           : `this build (${BUILD_ID}) is NOT one of them`,
-      ].join('\n'),
-    );
+      );
+    }
+    toast(lines.join('\n'));
   });
 
   return lines.join('\n');
