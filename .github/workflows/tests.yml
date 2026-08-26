@@ -120,6 +120,41 @@ jobs:
       - name: Install package with dev extras
         run: python -m pip install -e ".[dev]"
 
+      # THE EASYEDA API GUARDS READ THE VENDOR'S OWN CLASS REFERENCE:
+      # every eda.* call is a documented method, and every call passes
+      # the arguments its signature requires. Both checks exist because
+      # they caught real shipped bugs.
+      #
+      # reference/ is gitignored on purpose, so a runner has none of it,
+      # and 29 tests were skipping for want of a 3 MB public repo. The
+      # checks this project relies on for EasyEDA correctness were
+      # running on developer machines and nowhere else.
+      #
+      # A clone that fails takes the job down, which is the right
+      # direction to fail in: the alternative is what was happening
+      # already, a green run that checked nothing.
+      - name: Clone the official EasyEDA API reference
+        run: |
+          git clone --depth 1 https://github.com/easyeda/easyeda-api-skill.git reference/easyeda-api-skill
+          $classes = 'reference/easyeda-api-skill/references/classes'
+          if (-not (Test-Path $classes)) {
+            Write-Error "cloned, but $classes is missing, so the API guards would skip"
+            exit 1
+          }
+          $n = (Get-ChildItem $classes -File).Count
+          if ($n -lt 50) {
+            Write-Error "only $n class references found; expected the full set"
+            exit 1
+          }
+          Write-Host "$n class references available"
+
+      # The two extension-build tests need dist/, which is not committed.
+      # Building here is not circular: what they assert is that after a
+      # successful build the health check can reach PASS, which it could
+      # not before, and that main.js and BUILD_STAMP.json agree.
+      - name: Build the EasyEDA extension
+        run: python extensions/easyeda/build.py
+
       - name: DelphiScript lint
         run: python scripts/altium/lint.py
 
