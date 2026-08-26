@@ -1,4 +1,4 @@
-# Release verification: 2026.08.25.7
+# Release verification: 2026.08.26.1
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -25,6 +25,7 @@ works elsewhere cannot be an undeclared identifier:
 | 3, filled body | `AreaColor`, `IsSolid` | yes, `Generic.pas` | low |
 | 5, 3D placement | `MoveByXY` | yes, `PCB_ReplicateLayout` | low |
 | 11, copy and rename | `LibReference` | yes, `Lib_CreateSymbol` | low |
+| 12, delete variant | `DM_RemoveProjectVariant` | no, nowhere | highest, and it destroys work |
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
@@ -128,7 +129,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.25.7`, `version_match` =
+Expect `altium_script_version` = `2026.08.26.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -585,6 +586,45 @@ anything here. It comes from the CompInfoReader, which has been measured
 reporting 2 for a symbol created single-part whose every pin carries
 `OwnerPartId 1`, while `lib_get_component_details` reported 1 for an
 identically created symbol.
+
+## 12. Deleting a project variant (highest risk in this release)
+
+`DM_RemoveProjectVariant` is the only write in Altium's entire variant
+API, and nothing in this codebase has ever called it, so it carries the
+undeclared-identifier risk in full: if the name is wrong it faults where
+`Try/Except` cannot catch it and takes the polling loop with it.
+
+It is also the only step here that destroys work which cannot be
+rebuilt from this bridge. A variant's entries record which components
+are not fitted and which carry an alternate part, and there is no
+documented way to add a variation entry back. Deleting a populated
+variant means re-making every one of those decisions in the Variant
+Management dialog.
+
+**Work on a copy of a project, or take an `app_checkpoint` first.**
+
+Create a throwaway variant in the Variant Management dialog, then:
+
+    proj_list_variants
+    proj_delete_variant   variant_name SCRATCH_VARIANT
+    proj_list_variants
+
+The reply must carry `verified: true`, `variant_count_after` one lower
+than before, and `entries_removed`. The second listing must not contain
+the name. If the loop stops answering instead, the identifier is not
+declared in DelphiScript and the reference is wrong about it; say so
+and the tool comes back out.
+
+Then check the refusals, which cost nothing: a name that does not exist
+must return `VARIANT_NOT_FOUND` and change no count, and an empty
+`variant_name` must return `MISSING_PARAMS`.
+
+`proj_set_active_variant` changed in the same release and is cheap to
+check alongside. It used to report success on the strength of the name
+existing, without asking which variant was actually current afterwards.
+Switch to a variant and confirm the reply carries `verified: true`;
+the failure reply now names `current_variant` so a switch that did not
+take is distinguishable from one that did.
 
 ---
 

@@ -2731,10 +2731,10 @@ End;
 
 Function Proj_SetActiveVariant(Params : String; RequestId : String) : String;
 Var
-    ProjectPath, VariantName : String;
+    ProjectPath, VariantName, ActualName : String;
     Workspace : IWorkspace;
     Project : IProject;
-    Variant : IProjectVariant;
+    Variant, Current : IProjectVariant;
     I : Integer;
     Found : Boolean;
 Begin
@@ -2778,7 +2778,167 @@ Begin
     AddStringParameter('VariantName', VariantName);
     RunProcess('WorkspaceManager:VariantManagement');
 
-    Result := BuildSuccessResponse(RequestId, '{"success":true,"variant_name":"' + EscapeJsonString(VariantName) + '"}');
+    { READ BACK WHICH VARIANT IS CURRENT. The check above proves the name  }
+    { exists, which is not the same as the switch having happened, and     }
+    { this used to report success on the strength of that. The same        }
+    { VariantManagement process is documented here as unreliable for       }
+    { AddVariant, so taking its word on SetCurrentVariant was never safe.  }
+    ActualName := '';
+    Try
+        Current := Project.DM_CurrentProjectVariant;
+        If Current <> Nil Then ActualName := Current.DM_Name;
+    Except End;
+
+    If ActualName = VariantName Then
+        Result := BuildSuccessResponse(RequestId,
+            '{"success":true,"variant_name":"' + EscapeJsonString(VariantName)
+            + '","verified":true}')
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', False) + ',' +
+                JsonStr('variant_name', VariantName) + ',' +
+                JsonStr('current_variant', ActualName) + ',' +
+                JsonStr('reason', 'the switch was dispatched but the project '
+                    + 'still reports a different current variant. Set it in '
+                    + 'the Variant Management dialog.')
+            ));
+End;
+
+{..............................................................................}
+{ Proj_DeleteVariant - remove one project variant by name.                     }
+{                                                                              }
+{ DM_RemoveProjectVariant(Index) is the ONE documented write in the whole      }
+{ variant API. Everything else on IProject, IProjectVariant and                }
+{ IComponentVariation reads: counts, indexed accessors and DM_VariationKind.   }
+{ There is no documented way to add a variant, or to add or remove an          }
+{ individual component variation entry, which is why this covers deleting a    }
+{ whole variant and nothing finer.                                             }
+{                                                                              }
+{ Addressed BY NAME rather than by index, because an index is only valid       }
+{ against the listing that produced it: removing a variant renumbers the       }
+{ rest, so a caller deleting two by index deletes the wrong second one.        }
+{ Params: variant_name (required), project_path (optional, focused default).   }
+{..............................................................................}
+
+Function Proj_DeleteVariant(Params : String; RequestId : String) : String;
+Var
+    ProjectPath, VariantName : String;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Variant : IProjectVariant;
+    I, Target, PreCount, PostCount, Entries : Integer;
+    StillPresent : Boolean;
+Begin
+    VariantName := ExtractJsonValue(Params, 'variant_name');
+    ProjectPath := ExtractJsonValue(Params, 'project_path');
+
+    If VariantName = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'variant_name is required');
+        Exit;
+    End;
+
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_WORKSPACE', 'No workspace');
+        Exit;
+    End;
+
+    If ProjectPath <> '' Then Project := FindProjectByPath(Workspace, ProjectPath)
+    Else Project := Workspace.DM_FocusedProject;
+    If Project = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PROJECT', 'No project found');
+        Exit;
+    End;
+
+    PreCount := 0;
+    Try PreCount := Project.DM_ProjectVariantCount; Except End;
+
+    Target := -1;
+    Entries := -1;
+    For I := 0 To PreCount - 1 Do
+    Begin
+        Variant := Project.DM_ProjectVariants(I);
+        If (Variant <> Nil) And (Variant.DM_Name = VariantName) Then
+        Begin
+            Target := I;
+            { Reported so the caller learns what the deletion cost. A      }
+            { variant carrying fifty component variations and an empty one }
+            { are the same single call, and only one of them is cheap to   }
+            { recreate: there is no scripted way to put the entries back.  }
+            Try Entries := Variant.DM_VariationCount; Except End;
+            Break;
+        End;
+    End;
+
+    If Target < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'VARIANT_NOT_FOUND',
+            'Variant not found: ' + VariantName);
+        Exit;
+    End;
+
+    { Inside begin/end update, matching Proj_SetParameter: that pairing is }
+    { how a DM edit to the project is applied rather than merely made.     }
+    Project.DM_BeginUpdate;
+    Try
+        Project.DM_RemoveProjectVariant(Target);
+    Finally
+        Project.DM_EndUpdate;
+    End;
+
+    { VERIFY BOTH WAYS. A count that dropped proves something went, and the }
+    { name being gone proves it was this one. Neither alone does: a         }
+    { concurrent edit could change the count, and a rename would leave the  }
+    { count intact.                                                         }
+    PostCount := PreCount;
+    Try PostCount := Project.DM_ProjectVariantCount; Except End;
+
+    StillPresent := False;
+    For I := 0 To PostCount - 1 Do
+    Begin
+        Variant := Project.DM_ProjectVariants(I);
+        If (Variant <> Nil) And (Variant.DM_Name = VariantName) Then
+        Begin
+            StillPresent := True;
+            Break;
+        End;
+    End;
+
+    If StillPresent Or (PostCount >= PreCount) Then
+    Begin
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', False) + ',' +
+                JsonStr('variant_name', VariantName) + ',' +
+                JsonInt('variant_count_before', PreCount) + ',' +
+                JsonInt('variant_count_after', PostCount) + ',' +
+                JsonStr('reason', 'the removal was issued but the variant is '
+                    + 'still listed on the project afterwards.')
+            ));
+        Exit;
+    End;
+
+    { A variant lives in the .PrjPcb, so the deletion is only real once   }
+    { that file is written. This saves the project's own members rather   }
+    { than the workspace, for the reason proj_close was changed: a        }
+    { workspace-wide save can raise an Unsaved Changes prompt naming a    }
+    { project the caller never mentioned.                                 }
+    SaveProjectMembers(Project);
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonBool('success', True) + ',' +
+            JsonStr('variant_name', VariantName) + ',' +
+            JsonInt('entries_removed', Entries) + ',' +
+            JsonInt('variant_count_before', PreCount) + ',' +
+            JsonInt('variant_count_after', PostCount) + ',' +
+            JsonBool('verified', True)
+        ));
 End;
 
 {..............................................................................}
@@ -4424,6 +4584,7 @@ Begin
         'get_active_variant': Result := Proj_GetActiveVariant(Params, RequestId);
         'set_active_variant': Result := Proj_SetActiveVariant(Params, RequestId);
         'create_variant':    Result := Proj_CreateVariant(Params, RequestId);
+        'delete_variant':    Result := Proj_DeleteVariant(Params, RequestId);
         'get_open_projects': Result := Proj_GetOpenProjects(RequestId);
         'save_all':          Result := Proj_SaveAll(RequestId);
         'get_messages':      Result := Proj_GetMessages(Params, RequestId);

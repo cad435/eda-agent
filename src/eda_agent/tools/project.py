@@ -1470,6 +1470,47 @@ def register_project_tools(mcp):
         )
         return result
 
+    @mcp.tool()
+    async def proj_delete_variant(
+        variant_name: str,
+        project_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Delete a project variant, with every component variation in it.
+
+        THIS IS NOT REVERSIBLE FROM HERE. A variant's entries record which
+        components are not fitted and which carry an alternate part, and
+        ``DM_RemoveProjectVariant`` is the ONLY write in Altium's whole
+        variant API. There is no scripted way to add a variation entry
+        back, so deleting a variant with fifty entries costs fifty
+        decisions that have to be re-made in the Variant Management
+        dialog. The reply reports ``entries_removed`` so the size of that
+        is on the record; read it with ``proj_list_variants`` first if
+        the variant is not one you created.
+
+        The variant is addressed by name rather than index, because
+        removing one renumbers the rest: two deletions by index taken
+        from a single listing would remove the wrong second variant.
+
+        Args:
+            variant_name: name of the variant to remove.
+            project_path: optional project path; defaults to the focused
+                project.
+
+        Returns:
+            ``{"success": true, "variant_name": ..., "entries_removed": N,
+            "variant_count_before": N, "variant_count_after": N,
+            "verified": true}``, or ``success: false`` with a ``reason``
+            when the variant is still listed afterwards.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"variant_name": variant_name}
+        if project_path:
+            params["project_path"] = project_path
+        result = await bridge.send_command_async(
+            "project.delete_variant", params
+        )
+        return result
+
     # ------------------------------------------------------------------
     # Additional project operations
     # ------------------------------------------------------------------
