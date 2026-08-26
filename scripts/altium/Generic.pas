@@ -48,6 +48,11 @@ Begin
         _PropertyDiagStr := _PropertyDiagStr + '|' + Entry;
 End;
 
+Function AnyPropertyDiag : Boolean;
+Begin
+    Result := _PropertyDiagStr <> '';
+End;
+
 Function RenderPropertyDiagJson : String;
 Var
     UJson, FJson, Remaining, Entry, Kind, Nm : String;
@@ -92,6 +97,31 @@ Begin
             + ',"unknown":' + UJson
             + ',"failed_count":' + IntToStr(FCount)
             + ',"failed":' + FJson + '}';
+End;
+
+{ The tail every modify reply carries, so what was WRITTEN is reported      }
+{ alongside what was matched.                                               }
+{                                                                           }
+{ MEASURED: obj_modify was asked to set a sheet symbol's FileName and       }
+{ answered matched:1, saved:true three times over while writing nothing.    }
+{ That property is readable and has no case in the writer, so every attempt }
+{ was recorded here as an unknown name and then discarded, because only     }
+{ batch_modify ever rendered this buffer. Nothing in the reply distinguished }
+{ it from a real one, and an operator spent a session working around a      }
+{ rename that had never happened.                                           }
+{                                                                           }
+{ matched counts what the FILTER selected. It says nothing about whether a  }
+{ property write landed, so reporting it alone made a mis-spelled or        }
+{ unsupported name indistinguishable from success.                          }
+Function ModifyOutcomeJson : String;
+Begin
+    Result := ',"properties":' + RenderPropertyDiagJson;
+    If _PropertyDiagStr <> '' Then
+        Result := Result + ',"success":false,"reason":"one or more properties '
+            + 'were not written. properties.unknown lists names this build '
+            + 'does not write, properties.failed lists writes that threw."'
+    Else
+        Result := Result + ',"success":true';
 End;
 
 {..............................................................................}
@@ -190,6 +220,60 @@ Begin
     Except
         RecordCastError('GetSheetSymbolText:' + PropName);
         Result := '';
+    End;
+End;
+
+{ Write the same two labels. The read side existed and the write side did   }
+{ not, so obj_modify recognised SheetFileName well enough to return it and  }
+{ not well enough to set it.                                                }
+{                                                                           }
+{ THIS RE-POINTS A SYMBOL, IT DOES NOT RENAME A SHEET. The child sheet's    }
+{ filename lives in three places: this label, the file on disk, and the     }
+{ project's document list. Writing only the label leaves the other two      }
+{ alone, which is right when pointing a symbol at a sheet that already      }
+{ exists and wrong as a way to rename one. Altium's Sheet Symbol Actions >  }
+{ Rename Child Sheet does all three and keeps the symbol's UniqueId, which  }
+{ is the project's handle for that sheet instance: replacing the symbol     }
+{ instead would issue a new id, and the next Update PCB would propose       }
+{ delete-and-re-add for every component on the sheet rather than matching   }
+{ them.                                                                     }
+{                                                                           }
+{ Written through the sub-object exactly as GetSheetSymbolText reads it,    }
+{ with no intermediate typed local. Narrowing ISch_SheetFileName to a       }
+{ label interface is not something this codebase has demonstrated, and the  }
+{ direct access above is proven, so this stays on the proven shape.         }
+{                                                                           }
+{ The result is a READ BACK, not the fact that the assignment ran. That is  }
+{ the whole point: the caller reported success for this write for as long   }
+{ as it has existed, on the strength of having attempted it.                }
+Function SetSheetSymbolText(Obj : ISch_GraphicalObject; PropName : String;
+    Value : String) : Boolean;
+Var
+    SS : ISch_SheetSymbol;
+Begin
+    Result := False;
+    If Obj.ObjectId <> eSheetSymbol Then Exit;
+    Try
+        SS := Obj;
+        If PropName = 'Designator' Then
+        Begin
+            If SS.SheetName <> Nil Then
+            Begin
+                SS.SheetName.Text := Value;
+                Result := (SS.SheetName.Text = Value);
+            End;
+        End
+        Else If PropName = 'Filename' Then
+        Begin
+            If SS.SheetFileName <> Nil Then
+            Begin
+                SS.SheetFileName.Text := Value;
+                Result := (SS.SheetFileName.Text = Value);
+            End;
+        End;
+    Except
+        RecordCastError('SetSheetSymbolText:' + PropName);
+        Result := False;
     End;
 End;
 
@@ -343,6 +427,12 @@ Var
     R : ISch_Rectangle;
     L : ISch_Line;
     Matched : Boolean;
+    { Separate from Matched on purpose. Matched says the property NAME is
+      one this build writes; WroteOK says the value actually landed, read
+      back off the object. Collapsing them would report a recognised
+      property whose write did not stick as an unknown name, which points
+      a reader at a spelling mistake that is not there. }
+    WroteOK : Boolean;
 Begin
     { Measured on a live document: callers using modify_objects /             }
     { batch_modify                                                            }
@@ -355,6 +445,7 @@ Begin
     { Location.X so it still matches the moved pin.                          }
     Result := 0;
     Matched := True;
+    WroteOK := True;
     Try
         // Coordinates (expected in mils). `Obj.Location` returns a copy of
         // the TLocation record via the GetState_Location reader; writing
@@ -425,8 +516,24 @@ Begin
             Obj.ComponentDescription := Value
 
         // Sub-object string properties (compound interfaces, typed cast required)
+        // A sheet symbol carries its designator on SheetName rather than on the
+        // component Designator sub-object, so it is dispatched by ObjectId the
+        // same way GetSchProperty dispatches the read.
         Else If (PropName = 'Designator') Or (PropName = 'Designator.Text') Then
-            SetSchComponentSubText(Obj, 'Designator', Value)
+        Begin
+            If Obj.ObjectId = eSheetSymbol Then
+                WroteOK := SetSheetSymbolText(Obj, 'Designator', Value)
+            Else
+                SetSchComponentSubText(Obj, 'Designator', Value);
+        End
+        // Sheet-symbol filename. The READ side of this has always existed and
+        // the write side never did, so obj_modify knew the name well enough to
+        // return it and not well enough to set it, and said matched:1 either
+        // way. Re-points the symbol at a sheet; it does not rename one, see
+        // SetSheetSymbolText.
+        Else If (PropName = 'Filename') Or (PropName = 'FileName')
+             Or (PropName = 'SheetFileName') Then
+            WroteOK := SetSheetSymbolText(Obj, 'Filename', Value)
         Else If (PropName = 'Comment') Or (PropName = 'Comment.Text') Then
             SetSchComponentSubText(Obj, 'Comment', Value)
 
@@ -456,8 +563,9 @@ Begin
         Else If PropName = 'Selection'   Then Obj.Selection := StrToBool(Value)
         Else Matched := False;
 
-        If Matched Then Result := 1
-        Else Result := 0;
+        If Not Matched Then Result := 0
+        Else If Not WroteOK Then Result := -1
+        Else Result := 1;
     Except
         Result := -1;
     End;
@@ -1010,7 +1118,8 @@ Begin
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) +
             ',"sheets_processed":' + IntToStr(SheetsProcessed) +
-            ',"sheets_saved":' + IntToStr(SheetsSaved) + '}');
+            ',"sheets_saved":' + IntToStr(SheetsSaved)
+            + ModifyOutcomeJson + '}');
 End;
 
 {..............................................................................}
@@ -1055,7 +1164,8 @@ Begin
     Begin
         If Saved Then SavedStr := 'true' Else SavedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
-            '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr + '}');
+            '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr
+            + ModifyOutcomeJson + '}');
     End;
 End;
 
@@ -1107,7 +1217,8 @@ Begin
     Begin
         If Saved Then SavedStr := 'true' Else SavedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
-            '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr + '}');
+            '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr
+            + ModifyOutcomeJson + '}');
     End;
 End;
 
@@ -1326,6 +1437,12 @@ Begin
         Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS', 'set parameter is required');
         Exit;
     End;
+
+    { Start clean, so the reply describes THIS call. The buffer is module   }
+    { level and the bridge handles one request at a time, but a handler     }
+    { that left entries behind would otherwise fail the next caller for a   }
+    { property it never sent.                                               }
+    ResetPropertyDiag;
 
     ParseScope(Scope, ScopeType, ScopePath);
     If Not ApplyLibComponentScope(ScopeType, ScopePath) Then

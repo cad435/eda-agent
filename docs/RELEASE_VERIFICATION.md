@@ -1,4 +1,4 @@
-# Release verification: 2026.08.26.1
+# Release verification: 2026.08.26.2
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -26,6 +26,7 @@ works elsewhere cannot be an undeclared identifier:
 | 5, 3D placement | `MoveByXY` | yes, `PCB_ReplicateLayout` | low |
 | 11, copy and rename | `LibReference` | yes, `Lib_CreateSymbol` | low |
 | 12, delete variant | `DM_RemoveProjectVariant` | no, nowhere | highest, and it destroys work |
+| 13, sheet symbol filename | `Text` on a sheet symbol's sub-object | yes, on other objects | medium |
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
@@ -129,7 +130,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.26.1`, `version_match` =
+Expect `altium_script_version` = `2026.08.26.2`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -625,6 +626,51 @@ existing, without asking which variant was actually current afterwards.
 Switch to a variant and confirm the reply carries `verified: true`;
 the failure reply now names `current_variant` so a switch that did not
 take is distinguishable from one that did.
+
+## 13. obj_modify stops reporting writes it did not make
+
+Measured on a live project: `obj_modify` was asked three times to set a
+sheet symbol's `FileName`, answered `matched:1, saved:true` each time,
+and wrote nothing. The property is readable and had no case in the
+writer, so each attempt was recorded as an unknown name in a diagnostic
+buffer that only `batch_modify` ever rendered. Nothing in the reply
+distinguished it from a real one, and an operator spent a session
+working around a rename that had never happened.
+
+`matched` counts what the FILTER selected. It never said anything about
+whether a write landed. Every modify reply now carries `properties`
+and an explicit `success`.
+
+The cheapest check needs no sheet symbol at all. On any open schematic:
+
+    obj_modify  object_type eNetLabel  filter <anything that matches one>
+                set NotAPropertyName=1
+
+That must come back `success:false` with `NotAPropertyName` under
+`properties.unknown`, and `matched` may still be 1. Before this release
+it returned `matched:1, saved:true` and nothing else.
+
+Then the real one, on a sheet symbol whose child sheet you do NOT mind
+re-pointing, or on a scratch copy of a project:
+
+    obj_query   object_type eSheetSymbol  properties Filename,UniqueId
+    obj_modify  object_type eSheetSymbol  filter UniqueId=<the id>
+                set Filename=SOMETHING_ELSE.SchDoc
+    obj_query   object_type eSheetSymbol  properties Filename,UniqueId
+
+The reply must be `success:true` with an empty `properties.unknown`,
+and the second query must show the new text. A write that does not
+stick now reports under `properties.failed`, because the setter reads
+the label back rather than trusting the assignment.
+
+**This re-points a symbol, it does not rename a sheet.** The filename
+lives in three places: this label, the file on disk, and the project's
+document list. Only Altium's **Sheet Symbol Actions > Rename Child
+Sheet** does all three, and it keeps the symbol's `UniqueId`, which is
+the project's handle for that sheet instance. Deleting and re-placing a
+symbol issues a new id, and the next Update PCB then proposes
+delete-and-re-add for every component on the sheet instead of matching
+them.
 
 ---
 
