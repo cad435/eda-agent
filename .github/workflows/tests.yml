@@ -35,8 +35,44 @@ jobs:
       # of self-skipping: it compiles the real Pascal string/JSON/unit
       # helpers with fpc and asserts byte-for-byte parity with their
       # Python mirrors.
+      # THE COMPILER COMES FROM SOURCEFORGE AND SOURCEFORGE IS NOT
+      # RELIABLE. Measured: one run downloaded 51 MB in 6m05s, and a
+      # later one spent 11 minutes before failing with a 404 and
+      # "unexpected EOF from the transport stream". The suite had
+      # already passed; the run was red because somebody else's file
+      # server had a bad night.
+      #
+      # Caching the install means that after the first success this
+      # never asks again. It is only safe to do because the two
+      # assertions below already exist: a cache that restores to the
+      # wrong place, or restores something broken, fails on `fpc -iV`
+      # or on the skip check. Without those, this optimisation would be
+      # indistinguishable from deleting the job.
+      - name: Cache Free Pascal
+        id: fpc-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\tools\freepascal
+          key: freepascal-3.2.2-${{ runner.os }}
+
       - name: Install Free Pascal Compiler
-        run: choco install freepascal --no-progress -y
+        if: steps.fpc-cache.outputs.cache-hit != 'true'
+        run: |
+          # Retried, because the observed failure was a truncated
+          # transfer rather than a missing package. Three attempts with
+          # a pause, then give up honestly.
+          $ok = $false
+          foreach ($attempt in 1..3) {
+            Write-Host "freepascal install attempt $attempt"
+            choco install freepascal --version 3.2.2 --no-progress -y
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Write-Host "attempt $attempt failed with $LASTEXITCODE"
+            Start-Sleep -Seconds 20
+          }
+          if (-not $ok) {
+            Write-Error "freepascal could not be installed after 3 attempts"
+            exit 1
+          }
 
       # CHOCO DOES NOT PUT FPC ON THE PATH THAT LATER STEPS SEE. It
       # deploys to C:\tools\freepascal and updates the machine PATH, but
