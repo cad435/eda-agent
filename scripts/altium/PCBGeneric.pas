@@ -174,6 +174,29 @@ End;
 { PCB Property Setter                                                        }
 {..............................................................................}
 
+{ A caller-supplied layer name reaching a primitive through obj_modify.       }
+{ GetLayerFromString answered eTopLayer for every name it did not know, so    }
+{ set="Layer=Internal Plane 1" MOVED the primitive to the top copper layer.   }
+{ ResolveLayerId asks the board's own stack instead, and an unresolvable      }
+{ name is refused rather than silently rounded to the top.                    }
+{                                                                             }
+{ Reports whether it applied, because the caller now has somewhere to put     }
+{ that. ProcessActivePCBDoc still rejects the whole call up front via         }
+{ UnresolvedLayerAssignment, before any object has been touched, which is     }
+{ the stronger guarantee: a partly-applied batch is worse than a refused one. }
+Function SetPrimitiveLayerByName(Obj : IPCB_Primitive; Value : String) : Boolean;
+Var
+    Lyr : TLayer;
+Begin
+    Result := False;
+    Lyr := ResolveLayerId(GetPCBBoardAnywhere, Value);
+    If Lyr <> eNoLayer Then
+    Begin
+        Obj.Layer := Lyr;
+        Result := True;
+    End;
+End;
+
 { Returns: 1 = handled, 0 = unknown property name, -1 = write threw.        }
 {                                                                           }
 { THIS USED TO BE A Procedure, and that is the whole bug. It reported       }
@@ -190,6 +213,10 @@ End;
 { The schematic writer was given this contract and the PCB one was not, so  }
 { the same class of silent failure survived on this side. Both now feed the }
 { one buffer in Utils.                                                       }
+{                                                                           }
+{ The error channel this adds is the one SetPrimitiveLayerByName above was   }
+{ written without: an unresolvable layer name is now reported as a failed    }
+{ write rather than left quietly unapplied.                                  }
 Function SetPCBProperty(Obj : IPCB_Primitive; PropName : String; Value : String) : Integer;
 Var
     Track : IPCB_Track;
@@ -227,7 +254,7 @@ Begin
         End
         Else If PropName = 'X'        Then Obj.x := MilsToCoord(StrToIntDef(Value, 0))
         Else If PropName = 'Y'        Then Obj.y := MilsToCoord(StrToIntDef(Value, 0))
-        Else If PropName = 'Layer'    Then Obj.Layer := GetLayerFromString(Value)
+        Else If PropName = 'Layer'    Then SetPrimitiveLayerByName(Obj, Value)
         Else If PropName = 'Selected' Then Obj.Selected := StrToBool(Value)
         { Subtype members: narrow to a typed local via ObjectId first. }
         Else If PropName = 'X1' Then
@@ -591,13 +618,47 @@ Begin
     End;
 End;
 
+{ The first Layer= assignment in a set string this board cannot resolve, or    }
+{ '' when every one of them resolves. Checked before the iteration starts so   }
+{ a bad name costs nothing rather than relocating half the matched objects.    }
+
+Function UnresolvedLayerAssignment(Board : IPCB_Board; SetStr : String) : String;
+Var
+    Remaining, Assignment, PropName, PropValue : String;
+    PipePos, EqPos : Integer;
+Begin
+    Result := '';
+    Remaining := SetStr;
+    While Remaining <> '' Do
+    Begin
+        PipePos := Pos('|', Remaining);
+        If PipePos > 0 Then
+        Begin Assignment := Copy(Remaining, 1, PipePos - 1); Remaining := Copy(Remaining, PipePos + 1, Length(Remaining)); End
+        Else Begin Assignment := Remaining; Remaining := ''; End;
+        EqPos := Pos('=', Assignment);
+        If EqPos > 0 Then
+        Begin
+            PropName := UpperCase(Trim(Copy(Assignment, 1, EqPos - 1)));
+            PropValue := Trim(Copy(Assignment, EqPos + 1, Length(Assignment)));
+            If (PropName = 'LAYER') And (PropValue <> '') Then
+            Begin
+                If ResolveLayerId(Board, PropValue) = eNoLayer Then
+                Begin
+                    Result := PropValue;
+                    Exit;
+                End;
+            End;
+        End;
+    End;
+End;
+
 Function ProcessActivePCBDoc(ObjTypeInt : Integer;
     FilterStr : String; PropsStr : String; SetStr : String;
     Mode : String; RequestId : String; Limit : Integer) : String;
 Var
     Board : IPCB_Board;
     TotalMatched : Integer;
-    JsonItems, Why : String;
+    JsonItems, Why, BadLayer : String;
 Begin
     { A READ MAY WANDER; AN EDIT MAY NOT.                                   }
     {                                                                        }
@@ -627,6 +688,17 @@ Begin
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active');
         Exit;
+    End;
+
+    If SetStr <> '' Then
+    Begin
+        BadLayer := UnresolvedLayerAssignment(Board, SetStr);
+        If BadLayer <> '' Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'UNKNOWN_LAYER',
+                'Unknown layer name: ' + BadLayer + '. ' + BoardLayerNamesHint(Board));
+            Exit;
+        End;
     End;
     TotalMatched := 0;
     JsonItems := ProcessPCBBoardObjects(Board, ObjTypeInt,

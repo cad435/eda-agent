@@ -181,7 +181,13 @@ INTERACTION_OVERRIDES = {
     # published as silent, so anything filtering for "keeps the session
     # responsive" was handed a tool that blocks the bridge until a human
     # answers a dialog. The dialog seen is named beside each one.
-    "pcb_run_drc": MODAL,             # Design Rule Checker (TDesignRuleCheckForm)
+    # Design Rule Checker (TDesignRuleCheckForm). Altium exposes no
+    # non-interactive DRC trigger, so the tool's only functional path is
+    # the modal one: it refuses unless called with allow_modal=True.
+    # Measured behind the dialog: a 30-minute dead loop to an 1800 s
+    # client timeout. pcb_get_clearance_violations reads stored
+    # violations instead and stays readonly.
+    "pcb_run_drc": MODAL,
     "proj_export_pdf": MODAL,         # Preview PCB / print preview
     "proj_run_output": MODAL,         # Altium's exporter dialogs
     # These three raise "Unsaved Changes" whenever the target is dirty, and
@@ -209,6 +215,12 @@ INTERACTION_OVERRIDES = {
     # (mutates). State the truth explicitly rather than depending on a
     # side effect of another rule.
     "design_visual_review": READONLY,
+    # Reports a pin's root, its electrical connection point, and every
+    # object sitting on each. Pure inspection -- it exists precisely so a
+    # caller can debug connectivity WITHOUT touching the sheet. The obj_
+    # prefix defaults to "silent" (mutating), which is the opposite of
+    # the truth here, so say so explicitly.
+    "obj_explain_pin": READONLY,
     # part_fetch writes library files when given download_dir. The
     # "parts" category is offline, and offline falls back to READONLY,
     # which would advertise a tool that touches the filesystem as
