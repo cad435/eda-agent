@@ -30,7 +30,8 @@ a caller somewhere empty.
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Optional
 
 #: Document kinds a recipe can apply to. ``any`` means it does not turn
 #: on which document is in front.
@@ -359,8 +360,81 @@ def avoid_entries(recipe: dict, backend: str = ""):
     return out
 
 
+#: Phrases a docstring uses to send the reader somewhere else. Each is
+#: a recipe that somebody already wrote next to the code, which is the
+#: only place a recipe cannot go stale: the redirect and the tool it
+#: redirects to are edited together or not at all.
+_REDIRECT_MARKERS = (
+    "use this rather than",
+    "use this instead of",
+    "prefer ",
+    " instead of ",
+    " rather than ",
+    "this is the library tool",
+    "acts on an open",
+)
+
+#: Written like a tool name. Used to pull the target out of a redirect
+#: sentence rather than guessing which words are tools.
+_TOOLNAME = re.compile(r"(?<![a-z0-9_])((?:app|lib|pcb|sch|obj|proj|design|audit|run|part"
+                       r"|easyeda|kicad|sim|route|tool)_[a-z0-9_]+)")
+
+
+def derived_recipes(task: str, docs: dict[str, str],
+                    limit: int = 6) -> list[dict[str, Any]]:
+    """Recipes read off the tool docstrings, for what the table misses.
+
+    THE HAND-WRITTEN TABLE IS TEN ENTRIES AGAINST SEVEN HUNDRED TOOLS,
+    and an empty answer from it reads as "no such capability" however
+    carefully the note says otherwise. That reading has been made and
+    reported more than once.
+
+    Docstrings already carry the redirects: "use this rather than
+    lib_link_3d_model", "this is the LIBRARY tool", "acts on an open
+    .PcbDoc". They are maintained because they sit next to the code
+    they describe, which is exactly what a separate list of ten is not.
+
+    So a miss falls back to reading them. This finds fewer, vaguer
+    answers than a curated recipe, and it finds them for every tool
+    rather than for ten.
+    """
+    words = [w for w in re.split(r"[^a-z0-9]+", task.lower()) if len(w) > 2]
+    if not words or not docs:
+        return []
+
+    out: list[tuple[int, str, dict[str, Any]]] = []
+    for name, doc in docs.items():
+        if not doc:
+            continue
+        low = doc.lower()
+        # Score on the caller's words, in the name and in the text. The
+        # name is weighted higher: a tool called pcb_place_3d_body is a
+        # better answer to "place a 3d body" than one that mentions it.
+        score = sum(3 for w in words if w in name.lower())
+        score += sum(1 for w in words if w in low)
+        if score <= 0:
+            continue
+
+        redirects: list[str] = []
+        for line in doc.splitlines():
+            ll = line.lower()
+            if any(m in ll for m in _REDIRECT_MARKERS):
+                for other in _TOOLNAME.findall(line):
+                    if other != name and other not in redirects:
+                        redirects.append(other)
+        out.append((score, name, {
+            "use": [name],
+            "summary": (doc.strip().splitlines() or [""])[0].strip(),
+            "see_also": redirects,
+        }))
+
+    out.sort(key=lambda t: (-t[0], t[1]))
+    return [r for _s, _n, r in out[:limit]]
+
+
 def guidance_for(task: str = "", document_kind: str = "",
-                 backend: str = "") -> dict[str, Any]:
+                 backend: str = "",
+                 docs: Optional[dict[str, str]] = None) -> dict[str, Any]:
     """The recipes and dead ends matching one question. Pure, testable."""
     task = (task or "").strip()
     document_kind = (document_kind or "").strip().lower()
@@ -397,17 +471,28 @@ def guidance_for(task: str = "", document_kind: str = "",
     scored_dead.sort(key=lambda t: (-t[0], t[1]))
     dead_ends = [d for _s, _i, d in scored_dead]
 
+    # Only when the curated table missed. A hand-written recipe is a
+    # better answer when there is one, and mixing the two would bury it.
+    derived: list[dict[str, Any]] = []
+    if not recipes and not dead_ends and task and docs:
+        derived = derived_recipes(task, docs)
+
     return {
         "ok": True,
         "matched": len(recipes),
         "recipes": recipes,
         "not_possible": dead_ends,
+        "derived": derived,
         # An empty result is a real answer and must not read as an error.
         # It means this file has nothing on the subject, NOT that the
         # server cannot do it: fall back to tool_catalog.
-        "note": ("No recipe covers this; search the surface with "
-                 "tool_catalog before concluding a tool does not exist."
-                 if not recipes and not dead_ends else ""),
+        "note": ("No curated recipe covers this. `derived` is read off "
+                 "the tool docstrings and is the next best thing; "
+                 "tool_catalog searches the whole surface."
+                 if derived else
+                 ("No recipe covers this; search the surface with "
+                  "tool_catalog before concluding a tool does not exist."
+                  if not recipes and not dead_ends else "")),
     }
 
 
@@ -456,4 +541,13 @@ def register_guidance_tools(mcp):
             Dict with ``recipes`` (each with ``use``, ``avoid`` and a
             ``note``), ``not_possible``, and ``matched``.
         """
-        return guidance_for(task, document_kind, backend)
+        # The docstrings are read from the live registry rather than a
+        # copy, so a tool renamed or re-described is reflected the moment
+        # it is, with nothing to update here.
+        docs: dict[str, str] = {}
+        try:
+            for spec in await mcp.list_tools():
+                docs[spec.name] = getattr(spec, "description", "") or ""
+        except Exception:            # noqa: BLE001
+            docs = {}
+        return guidance_for(task, document_kind, backend, docs)
