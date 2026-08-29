@@ -1,4 +1,4 @@
-# Release verification: 2026.08.29.3
+# Release verification: 2026.08.29.4
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -30,6 +30,8 @@ works elsewhere cannot be an undeclared identifier:
 | 14, polygon pour options | `RemoveDead`, `RemoveNarrowNecks`, `RemoveIslandsByArea` | new here, and in two places at once | high, and it can stop the loop |
 | 15, 3D body on a board | `StandoffHeight` on a free body | only by step 5, itself unverified | highest, shared with step 5 |
 | 16, region kind | `Kind` on a region | read by four reference scripts, written by none | high, and it can stop the loop |
+| 17, component UniqueId | `UniqueId` on a placed component | no, nowhere | highest, and a wrong id costs the next Update PCB |
+| 18, pin owner part | `OwnerPartId` | yes, by two independent reference scripts | medium, behavioural not declarative |
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
@@ -137,7 +139,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.29.3`, `version_match` =
+Expect `altium_script_version` = `2026.08.29.4`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -840,6 +842,81 @@ hole. An unknown word is refused rather than ignored:
     obj_modify  object_type eRegionObject  filter <one>  set Kind=nonsense
 
 must come back `success:false` with `Kind` under `properties.unknown`.
+
+---
+
+## 17. Writing a component's UniqueId (highest risk in this release)
+
+`sch_set_component_unique_id` and `sch_replicate_component` both assign
+`ISch_Component.UniqueId`. Nothing in this repository wrote it before,
+and **no independent script in `reference/` writes it at all**, so the
+identifier is unattested. It is guarded with `Try/Except`, which is no
+guard: an undeclared identifier is not catchable in DelphiScript, so if
+the name is wrong the modal takes the polling loop down.
+
+It also carries a second risk that has nothing to do with whether the
+call works. **A UniqueId is the project's handle for a component.** Give
+one the wrong value and the next Update PCB stops matching that part and
+proposes delete-and-re-add for it instead, taking its placement and
+routing with it. That is a worse outcome than the tool failing.
+
+**Work on a copy of a project.** An `app_checkpoint` does not cover the
+PCB side of this.
+
+Read one first, so there is something to put back:
+
+    obj_query   object_type eSchComponent  filter Designator=<one>
+                properties UniqueId
+
+Then write the same value back to itself, which is the only edit here
+that cannot lose anything:
+
+    sch_set_component_unique_id  designator <the same>  unique_id <what it read>
+
+The reply must carry `success: true` and `unique_id_after` equal to what
+was asked. If the loop stops answering instead, the identifier is not
+declared and the tool comes back out.
+
+`success: false` with `unique_id_after` different is the OTHER outcome
+worth knowing: the call worked, Altium declined the assignment and kept
+its own id. That is a real answer, not a failure of the bridge, and it
+is what the comparison was added to surface.
+
+Only then try a component you do not mind re-annotating, and check with
+`proj_compare_sch_pcb` that the PCB still matches before and after.
+
+## 18. Moving a pin to another sub-part
+
+`lib_set_pin_owner_part` writes `OwnerPartId`, which two independent
+scripts in `reference/` also write, so unlike step 17 the identifier is
+attested and the risk is behavioural rather than declarative.
+
+The contributor stated plainly that this tool has never executed against
+a live Altium. Two things are worth checking because they fail quietly:
+
+    lib_get_pin_list        component_name <a multi-part symbol>
+    lib_set_pin_owner_part  component_name <the same>  pin_designators "3, 12"
+                            owner_part_id 2
+    lib_get_pin_list        component_name <the same>
+
+Both pins must come back with `owner_part_id` 2, and the count in the
+reply must be 2 rather than 1. The spaced form is deliberate: `"3, 12"`
+used to match nothing and report `count: 0` as a successful no-op.
+
+Then the bound, which is the one that corrupts rather than refuses:
+
+    lib_set_pin_owner_part  ...  owner_part_id 99
+
+must be refused. An id above the symbol's `PartCount` is accepted by the
+assignment and maps to no displayable part, so the pin vanishes from
+every sub-part view while the library still contains it.
+
+`owner_part_id 0` is Part Zero and is always legal: the pin is shared
+across all parts. Confirm it reads back as 0 rather than being treated
+as an error.
+
+Save with `app_save_all` and reopen the library before trusting any of
+it. A library edit is real in memory and absent from disk until then.
 
 ---
 
