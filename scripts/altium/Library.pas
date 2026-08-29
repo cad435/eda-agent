@@ -7232,7 +7232,14 @@ Begin
         Exit;
     End;
 
-    Component := SchLib.GetState_SchComponentByLibRef(WantName);
+    { LookupLibComponent, not the raw index. GetState_SchComponentByLibRef
+      asks an index the library only builds when it LOADS, so a symbol
+      created earlier in this same session is invisible to it: author a
+      symbol, then move its pins to a sub-part in the very next call, and
+      the second call reports COMPONENT_NOT_FOUND for a symbol that is
+      plainly there. The helper tries the index, then walks the document,
+      then the reference the script still holds from creation. }
+    Component := LookupLibComponent(SchLib, WantName);
     If Component = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'COMPONENT_NOT_FOUND',

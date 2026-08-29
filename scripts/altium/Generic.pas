@@ -134,21 +134,50 @@ End;
 Function GetSheetSymbolText(Obj : ISch_GraphicalObject; PropName : String) : String;
 Var
     SS : ISch_SheetSymbol;
+    Got : Boolean;
 Begin
     Result := '';
     If Obj.ObjectId <> eSheetSymbol Then Exit;
     Try
         SS := Obj;
+        Got := False;
         If PropName = 'Designator' Then
         Begin
-            Try If SS.SheetName <> Nil Then Result := SS.SheetName.Text; Except End;
+            Try
+                If SS.SheetName <> Nil Then
+                Begin
+                    Result := SS.SheetName.Text;
+                    Got := True;
+                End;
+            Except End;
         End
         Else If PropName = 'Filename' Then
         Begin
-            Try If SS.SheetFileName <> Nil Then Result := SS.SheetFileName.Text; Except End;
-        End;
+            Try
+                If SS.SheetFileName <> Nil Then
+                Begin
+                    Result := SS.SheetFileName.Text;
+                    Got := True;
+                End;
+            Except End;
+        End
+        Else
+            Got := True;
+
+        { AN EMPTY STRING WAS TWO DIFFERENT ANSWERS. A sheet symbol whose
+          label is genuinely blank and a build that does not expose the
+          sub-object at all both read '', and nothing distinguished them.
+          Measured: a session read Filename off a sheet symbol, got
+          nothing back, and concluded the hierarchy was broken. It was
+          intact; the read was.
+
+          The unreadable case is recorded so the reply can say so, in the
+          same buffer the writers use. }
+        If Not Got Then
+            NotePropertyDiag('unreadable', PropName);
     Except
         RecordCastError('GetSheetSymbolText:' + PropName);
+        NotePropertyDiag('unreadable', PropName);
         Result := '';
     End;
 End;
@@ -205,6 +234,7 @@ Begin
         RecordCastError('SetSheetSymbolText:' + PropName);
         Result := False;
     End;
+End;
 
 { Indexed vertex access for the polyline family (eWire, eBus, eLine,          }
 { ePolyline, ...). Recognises `Vertex<N>.X` / `Vertex<N>.Y`, `VertexLast.X` / }
@@ -411,6 +441,20 @@ Begin
         Else If PropName = 'AreaColor'   Then Result := IntToStr(Obj.AreaColor)
         Else If PropName = 'TextColor'   Then Result := IntToStr(Obj.TextColor)
         Else If PropName = 'Justification' Then Result := IntToStr(Obj.Justification)
+        { A SHEET ENTRY'S POSITION ON THE SYMBOL. Both read empty before,
+          because neither had a case here, so a caller checking whether a
+          placement took got nothing back and could not tell an unset
+          value from an unreadable one. Side is the enum ordinal and
+          DistanceFromTop is in mils, matching Location.X / Location.Y. }
+        Else If PropName = 'Side' Then
+        Begin
+            If Obj.ObjectId = eSheetEntry Then Result := IntToStr(Obj.Side);
+        End
+        Else If PropName = 'DistanceFromTop' Then
+        Begin
+            If Obj.ObjectId = eSheetEntry Then
+                Result := IntToStr(CoordToMils(Obj.DistanceFromTop));
+        End
 
         // Coord properties (returned in mils)
         Else If PropName = 'Width'       Then Result := IntToStr(CoordToMils(Obj.Width))
@@ -629,9 +673,11 @@ Begin
         End
         Else If PropName = 'PartCount' Then
         Begin
-            { LoadComponentFromLibrary stamps PartCount=4 on this UL
-              TLV9024PWR even though the SchLib reports part_count=5.
-              Without a write path the supply unit cannot be selected.
+            { LoadComponentFromLibrary can stamp a PLACED component with a
+              lower PartCount than the SchLib symbol reports. Measured on
+              a multi-part symbol: the placed part read 4 against the
+              library's 5, and without a write path the last sub-part,
+              which was the supply unit, could not be selected at all.
               Do NOT call SetState_PartCount: that identifier is not on
               ISch_Component in this DelphiScript, and undeclared
               identifiers raise a modal that bypasses Try/Except. }
@@ -1360,8 +1406,12 @@ Begin
     End;
 
     If Mode = 'query' Then
+        { The diagnostic rides on a QUERY as well. A property that could
+          not be read comes back as an empty string, and without this the
+          caller cannot tell that from a value that is genuinely empty. }
         Result := BuildSuccessResponse(RequestId,
-            '{"objects":[' + JsonItems + '],"count":' + IntToStr(TotalMatched) + '}')
+            '{"objects":[' + JsonItems + '],"count":' + IntToStr(TotalMatched)
+            + ',"properties":' + RenderPropertyDiagJson + '}')
     Else
     Begin
         If Saved Then SavedStr := 'true' Else SavedStr := 'false';
@@ -1413,8 +1463,12 @@ Begin
     End;
 
     If Mode = 'query' Then
+        { The diagnostic rides on a QUERY as well. A property that could
+          not be read comes back as an empty string, and without this the
+          caller cannot tell that from a value that is genuinely empty. }
         Result := BuildSuccessResponse(RequestId,
-            '{"objects":[' + JsonItems + '],"count":' + IntToStr(TotalMatched) + '}')
+            '{"objects":[' + JsonItems + '],"count":' + IntToStr(TotalMatched)
+            + ',"properties":' + RenderPropertyDiagJson + '}')
     Else
     Begin
         If Saved Then SavedStr := 'true' Else SavedStr := 'false';
@@ -1547,6 +1601,9 @@ Begin
     Limit := StrToIntDef(ExtractJsonValue(Params, 'limit'), 0);
 
     If PropsStr = '' Then PropsStr := 'Location.X,Location.Y';
+    { Start clean, so the reply describes THIS query. }
+    ResetPropertyDiag;
+
     ParseScope(Scope, ScopeType, ScopePath);
 
     { A PCB OBJECT TYPE CANNOT HONOUR A SCOPE, so say so before doing         }
@@ -3389,8 +3446,8 @@ Var
     Sym : ISch_SheetSymbol;
     Entry : ISch_SheetEntry;
     SheetNameStr, EntryName, IOStr, SideStr, ThisName : String;
-    DistFromTop : Integer;
-    Found : Boolean;
+    DistFromTop, WantSide, GotSide, GotDist, GotX, GotY : Integer;
+    Found, Placed : Boolean;
 Begin
     SheetNameStr := ExtractJsonValue(Params, 'sheet_name');
     EntryName := ExtractJsonValue(Params, 'entry_name');
@@ -3464,28 +3521,72 @@ Begin
     Else If IOStr = 'bidirectional' Then Entry.IOType := ePortBidirectional
     Else Entry.IOType := ePortUnspecified;
 
-    If SideStr = 'right' Then Entry.Side := eRightSide
-    Else If SideStr = 'top' Then Entry.Side := eTopSide
-    Else If SideStr = 'bottom' Then Entry.Side := eBottomSide
-    Else Entry.Side := eLeftSide;
+    { Kept in a local so the same value can be re-asserted after the add
+      and compared against what the entry ended up with. }
+    If SideStr = 'right' Then WantSide := eRightSide
+    Else If SideStr = 'top' Then WantSide := eTopSide
+    Else If SideStr = 'bottom' Then WantSide := eBottomSide
+    Else WantSide := eLeftSide;
+    Entry.Side := WantSide;
 
-    { Use AddAndPositionSchObject, not AddSchObject. The plain AddSchObject       }
-    { attaches the entry to the parent sheet symbol's child container but does    }
-    { NOT compute the entry's geometric position from Side + DistanceFromTop;     }
-    { the entry ends up drawn at default 0,0 world coords, off the sheet symbol.  }
-    { AddAndPositionSchObject performs the position calc against the symbol's    }
-    { current bounds. See SDK reference, ISch_BasicContainer interface.          }
+    { AddAndPositionSchObject POSITIONS IT ITSELF, and in doing so discards
+      the Side and DistanceFromTop set above.
+
+      MEASURED on a live sheet, across 90 entries: every one ignored
+      distance_from_top and side. They stacked at a fixed 50 mil pitch in
+      PLACEMENT ORDER, restarting per symbol, at negative Y, which puts
+      them below the sheet origin instead of on the symbol body. The
+      comment that used to sit here claimed the opposite, that the call
+      computes the position from Side and DistanceFromTop against the
+      symbol's bounds. It does not.
+
+      Same shape as AddSchComponent overriding LibReference: the add is
+      what decides, so anything set before it has to be set again after.
+      Re-asserted below, then read back. }
     SchServer.ProcessControl.PreProcess(SchDoc, '');
     Sym.AddAndPositionSchObject(Entry);
+
+    Try Entry.Side := WantSide; Except End;
+    Try Entry.DistanceFromTop := MilsToCoord(DistFromTop); Except End;
+
     SchRegisterObject(Sym, Entry);
     SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     SchDoc.GraphicallyInvalidate;
 
+    { READ BACK. placed:true and an echo of the requested side was the
+      whole reply, so a caller asking for the left edge at 300 mils was
+      told it had happened whatever the entry actually did. }
+    GotSide := -1;
+    GotDist := -1;
+    Try GotSide := Entry.Side; Except End;
+    Try GotDist := CoordToMils(Entry.DistanceFromTop); Except End;
+    GotX := 0;
+    GotY := 0;
+    Try
+        GotX := CoordToMils(Entry.Location.X);
+        GotY := CoordToMils(Entry.Location.Y);
+    Except End;
+
+    Placed := (GotSide = WantSide) And (GotDist = DistFromTop);
+
     Result := BuildSuccessResponse(RequestId,
-        '{"placed":true,"sheet_name":"' + EscapeJsonString(SheetNameStr) + '",'
-        + '"entry_name":"' + EscapeJsonString(EntryName) + '",'
-        + '"io_type":"' + EscapeJsonString(IOStr) + '",'
-        + '"side":"' + EscapeJsonString(SideStr) + '"}');
+        JsonObj(
+            JsonBool('placed', True) + ',' +
+            JsonBool('positioned_as_asked', Placed) + ',' +
+            JsonStr('sheet_name', SheetNameStr) + ',' +
+            JsonStr('entry_name', EntryName) + ',' +
+            JsonStr('io_type', IOStr) + ',' +
+            JsonStr('requested_side', SideStr) + ',' +
+            JsonInt('requested_distance_from_top', DistFromTop) + ',' +
+            JsonInt('actual_side', GotSide) + ',' +
+            JsonInt('actual_distance_from_top', GotDist) + ',' +
+            JsonInt('x', GotX) + ',' +
+            JsonInt('y', GotY) + ',' +
+            JsonStr('note', 'x and y are read back from the placed entry. '
+                + 'If positioned_as_asked is false the entry exists but sits '
+                + 'where Altium put it; obj_modify on eSheetEntry can set '
+                + 'Location.X and Location.Y absolutely.')
+        ));
 End;
 
 {..............................................................................}
@@ -5560,10 +5661,30 @@ Begin
         Exit;
     End;
 
-    Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"designator":"' + EscapeJsonString(Designator)
-        + '","unique_id":"' + EscapeJsonString(UniqueIdStr)
-        + '","unique_id_after":"' + EscapeJsonString(AfterId) + '"}');
+    { THE READ BACK WAS ALREADY HERE AND NOTHING COMPARED IT. success was
+      true whether or not AfterId matched what was asked for, so a caller
+      had to notice the discrepancy between two adjacent fields to learn
+      the write had not taken. Altium mints UniqueIds itself and this is
+      the property it is most likely to overrule, which is the whole
+      reason the read back exists. }
+    If AfterId = UniqueIdStr Then
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', True) + ',' +
+                JsonStr('designator', Designator) + ',' +
+                JsonStr('unique_id', UniqueIdStr) + ',' +
+                JsonStr('unique_id_after', AfterId)
+            ))
+    Else
+        Result := BuildSuccessResponse(RequestId,
+            JsonObj(
+                JsonBool('success', False) + ',' +
+                JsonStr('designator', Designator) + ',' +
+                JsonStr('unique_id', UniqueIdStr) + ',' +
+                JsonStr('unique_id_after', AfterId) + ',' +
+                JsonStr('reason', 'the component kept its own id; Altium '
+                    + 'declined the assignment')
+            ));
 End;
 
 {..............................................................................}
@@ -5678,8 +5799,13 @@ Begin
 
     If CopyId = MasterId Then Shared := 'true' Else Shared := 'false';
 
+    { success reflects whether the copy KEPT the master's id, which is the
+      thing this handler exists to achieve. Replicate plus AddSchObject
+      mints a new one, so reporting true regardless would hide exactly
+      the failure the staged read backs were added to expose. }
     Result := BuildSuccessResponse(RequestId,
-        '{"success":true,"source_designator":"' + EscapeJsonString(Designator)
+        '{"success":' + BoolToJsonStr(Shared = MasterId)
+        + ',"source_designator":"' + EscapeJsonString(Designator)
         + '","new_designator":"' + EscapeJsonString(NewDesig)
         + '","part_id":' + IntToStr(PartId)
         + ',"source_unique_id":"' + EscapeJsonString(MasterId)

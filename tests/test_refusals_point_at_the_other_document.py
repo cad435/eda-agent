@@ -39,6 +39,12 @@ _NO_HINT_NEEDED = {
     "NO_LIBRARY": "the message already says to supply library_path",
     "NO_SCH_SERVER": "an infrastructure failure, not a document mix-up",
     "USE_DEDICATED_TOOL": "the message already names the tool to call",
+    # The board is the right document and the LAYER is the wrong kind, so
+    # there is no sibling document to point at. The refusal already names
+    # pcb_place_polygon_rect for the signal-layer case, which is the
+    # redirect a hint would have added.
+    "NOT_A_PLANE": "a wrong layer kind, not a wrong document, and the "
+                   "message already names the tool for the other case",
     "WRONG_DOCUMENT_FOCUSED": "already names asked-for and actual",
     "WRONG_LIBRARY": "already names asked-for and actual",
     "WRONG_DOC_KIND": "already says to pass sheet_path",
