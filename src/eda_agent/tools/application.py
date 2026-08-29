@@ -231,6 +231,111 @@ def register_application_tools(mcp):
         return bridge.get_altium_status()
 
     @mcp.tool()
+    async def app_context() -> dict[str, Any]:
+        """Where you are, in one call. Run this before anything else.
+
+        THE FOUR FACTS THAT EXPLAIN MOST "WHY DIDN'T THAT WORK". Each has
+        cost a session on its own, and each was individually available
+        and individually unasked for:
+
+        * **Which document is focused, and what kind it is.** Nearly
+          every tool acts on the focused document. A pcb_ tool aimed
+          while a library is focused does not always fail; it can resolve
+          some other open document and report success for work you did
+          not ask for.
+        * **Whether the running script matches the one on disk.**
+          DelphiScript caches compiled units, so a deployed fix does
+          nothing until the script project is reopened. Symptom: a fix
+          that "did not work".
+        * **What is unsaved.** An edit that is real in memory and absent
+          from disk reads as a tool that silently did nothing.
+        * **Whether the bridge is answering at all**, as opposed to
+          Altium being up.
+
+        This composes existing reads rather than adding a bridge call, so
+        it is cheap and cannot disagree with the tools it summarises.
+
+        WHAT IT DOES NOT TELL YOU: which library component is current.
+        That is editor state with no read exposed, and the library
+        authoring tools depend on it. If a lib_add_* call lands somewhere
+        unexpected, set the target explicitly with
+        ``lib_set_current_component`` rather than assuming.
+
+        Returns:
+            ``{"backend": ..., "bridge_answering": bool,
+            "script_version_match": bool, "active_document": {...},
+            "open_document_count": N, "unsaved": [paths],
+            "warnings": [...], "next_step": ...}``.
+
+            ``warnings`` is empty when nothing needs attention.
+            ``next_step`` is the single thing worth doing first, or empty.
+        """
+        bridge = get_bridge()
+        warnings: list[str] = []
+        next_step = ""
+
+        ping = await app_ping()
+        answering = bool(ping.get("success"))
+        version_match = bool(ping.get("version_match"))
+        if not answering:
+            warnings.append(ping.get("message", "the bridge is not answering"))
+            next_step = (
+                "Start the polling loop: File > Run Script > Altium_API > "
+                "Dispatcher.pas > StartMCPServer."
+            )
+        elif not version_match:
+            # Ranked above everything else on purpose. Every other answer
+            # below is being produced by code that is not the code on
+            # disk, so acting on them can be worse than not asking.
+            warnings.append(ping.get("message", "stale script cache"))
+            next_step = (
+                "Close and reopen Altium_API.PrjScr so Altium recompiles. "
+                "Until then the running script is not the deployed one."
+            )
+
+        active: dict[str, Any] = {}
+        open_count = 0
+        unsaved: list[str] = []
+        if answering:
+            try:
+                active = await bridge.send_command_async(
+                    "application.get_active_document") or {}
+            except Exception as exc:            # noqa: BLE001
+                warnings.append(f"could not read the active document: {exc}")
+            try:
+                docs = await bridge.send_command_async(
+                    "application.get_open_documents") or []
+                if isinstance(docs, dict):
+                    docs = docs.get("documents", [])
+                open_count = len(docs)
+                unsaved = [d.get("file_path", "") for d in docs
+                           if isinstance(d, dict) and d.get("modified")]
+            except Exception as exc:            # noqa: BLE001
+                warnings.append(f"could not list open documents: {exc}")
+
+            if not active.get("file_path"):
+                warnings.append(
+                    "no document is focused, so any tool that acts on the "
+                    "focused document has nothing to act on")
+            if unsaved and not next_step:
+                next_step = (
+                    f"{len(unsaved)} document(s) have unsaved changes. "
+                    "app_save_all flushes them, and reports still_dirty.")
+
+        return {
+            "backend": "altium",
+            "bridge_answering": answering,
+            "script_version_match": version_match,
+            "running_script_version": ping.get("altium_script_version"),
+            "deployed_script_version": ping.get("bundled_script_version"),
+            "active_document": active,
+            "open_document_count": open_count,
+            "unsaved": unsaved,
+            "warnings": warnings,
+            "next_step": next_step,
+        }
+
+    @mcp.tool()
     async def app_attach() -> dict[str, Any]:
         """Connect to a running Altium Designer instance.
 

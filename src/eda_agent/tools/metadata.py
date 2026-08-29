@@ -97,7 +97,8 @@ _CATEGORY_BY_PREFIX = (
 # handler, and a tool is only covered when EVERY command it sends is,
 # because one unanswered call ends the run just as surely.
 _SIMULATOR_TOOLS = frozenset({
-    "app_detach", "app_get_active_document", "app_get_version",
+    "app_context", "app_detach", "app_get_active_document",
+    "app_get_version",
     "app_list_documents", "app_set_active_document",
     "audit_find_missing_decoupling",
     "audit_find_pin_net_name_mismatches",

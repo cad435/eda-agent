@@ -154,9 +154,9 @@ def register_generic_tools(mcp):
         Example - modify a specific sheet without switching:
             obj_modify(
                 object_type="eParameter",
-                scope="doc:C:\\path\\USB_LANBridge.SchDoc",
+                scope="doc:C:\\path\\MODULE_A.SchDoc",
                 filter="Name=Title",
-                set="Text=USB-Ethernet Bridge"
+                set="Text=Module A"
             )
         Example - edit a pin inside one SchLib symbol (no lib_set_current_component):
             obj_modify(
