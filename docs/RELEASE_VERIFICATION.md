@@ -1,4 +1,4 @@
-# Release verification: 2026.08.26.2
+# Release verification: 2026.08.29.1
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -17,7 +17,7 @@ works elsewhere cannot be an undeclared identifier:
 
 | Step | Property | Written elsewhere? | Risk |
 |---|---|---|---|
-| 5, 3D placement | `StandoffHeight` | no, nowhere | highest |
+| 5, 3D placement | `StandoffHeight` | only by step 15, itself unverified | highest |
 | 5, 3D placement | `Rotation` on a body | other object types only | high |
 | 2, pin edges | `Symbol_OuterEdge`, `Symbol_InnerEdge` | no, nowhere | high, and can stop the loop |
 | 7, enum words | `StrToPinElectrical` | yes, `Lib_AddPins` | medium |
@@ -27,6 +27,9 @@ works elsewhere cannot be an undeclared identifier:
 | 11, copy and rename | `LibReference` | yes, `Lib_CreateSymbol` | low |
 | 12, delete variant | `DM_RemoveProjectVariant` | no, nowhere | highest, and it destroys work |
 | 13, sheet symbol filename | `Text` on a sheet symbol's sub-object | yes, on other objects | medium |
+| 14, polygon pour options | `RemoveDead`, `RemoveNarrowNecks`, `RemoveIslandsByArea` | new here, and in two places at once | high, and it can stop the loop |
+| 15, 3D body on a board | `StandoffHeight` on a free body | only by step 5, itself unverified | highest, shared with step 5 |
+| 16, region kind | `Kind` on a region | read by four reference scripts, written by none | high, and it can stop the loop |
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
@@ -41,6 +44,10 @@ there would be behavioural: whether moving a group moves its children.
 a body, and DelphiScript resolves a property against the object in hand,
 so another interface accepting it proves nothing here. Only
 `StandoffHeight` is entirely unexercised.
+
+Two steps now write `StandoffHeight` and neither has run, so they do not
+vouch for each other: steps 5 and 15 share one unproven identifier. Run
+whichever is easier and the other drops to a behavioural check.
 
 ### What this release adds, and why it is a different kind of risk
 
@@ -130,7 +137,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.26.2`, `version_match` =
+Expect `altium_script_version` = `2026.08.29.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -671,6 +678,168 @@ the project's handle for that sheet instance. Deleting and re-placing a
 symbol issues a new id, and the next Update PCB then proposes
 delete-and-re-add for every component on the sheet instead of matching
 them.
+
+## 14. Polygon pour options, and the PCB writer that never reported
+
+Three properties this codebase has never written, so this carries the
+undeclared-identifier risk in full. They are declared on `IPCB_Polygon`
+with both accessors:
+
+    Property RemoveDead : Boolean Read GetState_RemoveDead
+                                  Write SetState_RemoveDead;
+
+and the same shape for `RemoveNarrowNecks` and `RemoveIslandsByArea`.
+Reported from a live board as "not an exposed property on this API",
+which was a fair reading of a modify that answered `matched:2` and wrote
+nothing.
+
+**Nothing here repours.** These decide what the NEXT pour produces, so
+the copper does not change until `pcb_repour_polygons` runs. Check the
+flag first and the pour second, or a working change looks like a failed
+one.
+
+    pcb_get_polygons
+    pcb_modify_polygon  index 0  remove_dead true
+    pcb_get_polygons
+
+The reply must carry `changed: ["remove_dead"]`, `modified: true` and
+`repour_needed: true`. Then repour and confirm the dead copper goes.
+
+Set it back to `false` afterwards and confirm `changed` names it again:
+a handler that ignored the value and always wrote true would pass the
+first half on its own.
+
+Two refusals, which cost nothing and are the point of the release:
+
+    pcb_modify_polygon  index 0  hatch_style Horizontal
+    pcb_modify_polygon  index 0  net NO_SUCH_NET
+
+Both must come back with `success: false` and the field named under
+`not_applied`. `Horizontal` was documented by the tool and handled by no
+branch, so it changed nothing and reported success; a net name that
+matches nothing did the same.
+
+The PCB property writer also reports now, so the generic route says so
+too. On any board:
+
+    obj_modify  object_type ePolyObject  set NotAProperty=1
+
+must come back `success:false` with the name under
+`properties.unknown`. Before this it returned a bare `matched` count.
+
+## 15. A STEP model straight onto the board, and a read that stopped moving focus
+
+Two things from one session, and the second is why the first took so
+long to diagnose.
+
+**THIS TOOL HAS ALREADY CRASHED ALTIUM ONCE.** The first build set
+Layer, x, y and StandoffHeight on the body before adding it to the
+board, and the PCB engine went down with "Access violation ... Read of
+address 0x20" inside ADVPCB.DLL. A null dereference at a small field
+offset is a property setter reaching for state that an owning board
+provides. It also assigned x and y directly, where the reference and
+`Lib_Link3DModel` both use `MoveByXY` after the add.
+
+Both are corrected: add, register, then Layer, then MoveByXY, then
+StandoffHeight. Treat this step as unproven all the same, and take an
+`app_checkpoint` before running it.
+
+**`pcb_place_3d_body`** puts a STEP model on the open PcbDoc as a free
+3D body, which is Altium's Place > 3D Body > Generic STEP Model. Until
+now `lib_link_3d_model` was the only STEP importer in the toolset and it
+writes into a `.PcbLib` footprint, so putting a fixture or a
+device-under-test on a board meant inventing a library, authoring a
+footprint, placing it and deleting all of it again. The call sequence
+here is the one `Lib_Link3DModel` already uses, minus the footprint
+binding, so every identifier in it is exercised by shipped code.
+
+On a scratch board, with any `.step` to hand:
+
+    pcb_place_3d_body  model_path <path>  x 1000  y 1000  standoff_height 100
+    obj_switch_view    3d
+
+The reply's `x` and `y` are READ BACK from the placed body rather than
+echoed. Confirm `standoff_applied` is true, then look: the body must be
+visible and sitting 100 mils proud. `rotation_applied` is always false
+and says why in `note`.
+
+Then the refusals, which cost nothing:
+
+    pcb_place_3d_body  model_path C:\nope.step
+    pcb_place_3d_body  model_path <a .txt file>
+
+The first must be `FILE_NOT_FOUND` and the second `MODEL_LOAD_FAILED`.
+They are separated on purpose: the path is checked before anything is
+created, because `ModelFactory_FromFilename` on a missing file returns
+Nil and leaves an orphan body behind.
+
+**The focus fix has no visible output, so check it by its absence.**
+Nine read-only library actions used to leave the active document on the
+library they read, because focusing it is the only way the PCBServer and
+SchServer accessors will answer about it. Measured: `lib_probe_footprint`
+silently focused a PcbLib, and the `obj_switch_view 3d` that followed
+switched the LIBRARY into 3D. The board looked untouched and the model
+looked absent.
+
+With a PcbDoc focused:
+
+    lib_probe_footprint  library_path <some .PcbLib>  footprint_name <one>
+    app_get_active_document
+
+The active document must still be the PcbDoc. Try it with
+`lib_search`, `lib_get_component_details` and `lib_audit_styles` too;
+all nine are listed in `LibActionIsReadOnly`.
+
+Then confirm the opposite, which is the half that could regress
+silently: library WRITES must still leave the library focused, because
+authoring is a sequence of calls against a current component.
+
+    lib_set_current_component  <a symbol>
+    lib_add_pins               <a pin or two>
+
+The pins must land on that symbol. If they land nowhere, the restore has
+been applied to writes and the authoring flow is broken.
+
+## 16. A region's Kind, and board cutouts
+
+Reported from a live board as "the Board Cutout flag on a Region isn't
+reachable through this API". It is:
+
+    Property Kind : TRegionKind Read GetState_Kind Write SetState_Kind;
+
+and it had simply never been exposed, which is the third instance this
+release of a property being called absent because a reply said nothing.
+
+The five identifiers are attested rather than assumed: four independent
+scripts in `reference/` COMPARE against `eRegionKind_BoardCutout`,
+`_Cutout`, `_Copper`, `_NamedRegion` and `_Cavity`, so they exist in
+DelphiScript. None of them ASSIGNS one, so the write is unproven in the
+way `StandoffHeight` is. Read first, and take an `app_checkpoint` before
+writing.
+
+Words, not numbers, in both directions. The ordinals are undocumented,
+and publishing one invites a caller to write it back.
+
+On a board with an existing cutout:
+
+    obj_query   object_type eRegionObject  properties Kind,Layer
+
+At least one region must come back `board_cutout` or `cutout`. If every
+region reads `unknown`, the comparison is not matching and the write
+below must not be attempted.
+
+Then, on a scratch region you do not mind losing:
+
+    obj_modify  object_type eRegionObject  filter <one region>
+                set Kind=board_cutout
+    obj_query   object_type eRegionObject  properties Kind
+
+It must read back `board_cutout`, and the board outline must show the
+hole. An unknown word is refused rather than ignored:
+
+    obj_modify  object_type eRegionObject  filter <one>  set Kind=nonsense
+
+must come back `success:false` with `Kind` under `properties.unknown`.
 
 ---
 
