@@ -61,6 +61,7 @@ Var
     RequestContent, ResponseContent : String;
     Command, Params, ProtoVer, EnvelopeError : String;
     ExceptionMsg : String;
+    FocusBefore, FocusAfter : String;
     StartMs, DurationMs : Cardinal;
     ResultTag : String;
     DashIsError : Boolean;
@@ -145,6 +146,18 @@ Begin
     { status pill drops back to idle/paused/green when we're done.       }
     SetInFlight(Command);
 
+    { WHERE THE CALLER WAS LOOKING, BEFORE THE HANDLER RAN.
+      Nearly every tool acts on the focused document, and several change
+      it as a side effect of doing their job. Nothing announced that.
+      Measured: lib_probe_footprint focused a PcbLib to read it, the
+      obj_switch_view that followed switched the LIBRARY into 3D, and the
+      session spent a long time looking for a placement bug that was not
+      there.
+      Captured here rather than per handler because there are hundreds of
+      them and this is the one place every command passes through. }
+    FocusBefore := CurrentFocusedDocPath;
+    ResetNextStep;
+
     ExceptionMsg := '';
     { Heartbeat: write progress_<id>.json so Python can distinguish "still      }
     { working" from "polling loop dead" when the 10 s default deadline runs   }
@@ -168,6 +181,25 @@ Begin
                 'Handler returned empty response for: ' + Command);
             ResultTag := 'EMPTY';
         End;
+
+        { Say so if the active document moved. Appended as a sibling of
+          data rather than merged into it, because data is whatever the
+          handler chose to return and this must not depend on its shape.
+          Silent when nothing moved, which is the overwhelming majority. }
+        { The follow-up this reply owes, if the handler named one. }
+        If PendingNextStep <> '' Then
+            ResponseContent := AppendEnvelopeField(ResponseContent,
+                JsonStr('next_step', PendingNextStep));
+
+        FocusAfter := CurrentFocusedDocPath;
+        If FocusAfter <> FocusBefore Then
+            ResponseContent := AppendEnvelopeField(ResponseContent,
+                '"active_document_changed":' + JsonObj(
+                    JsonStr('from', FocusBefore) + ',' +
+                    JsonStr('to', FocusAfter) + ',' +
+                    JsonStr('note', 'this command moved the focused '
+                        + 'document. Tools that act on the focused '
+                        + 'document will now act on the new one.')));
 
         WriteResponseFile(RequestId, ResponseContent);
     Finally

@@ -161,6 +161,15 @@ Var
     ServerDoc : IServerDocument;
 Begin
     If SchLib = Nil Then Exit;
+
+    { EVERY DEFERRED SAVE PASSES THROUGH HERE, which is why the follow-up
+      is noted here rather than in the forty-odd handlers that call it.
+      The edit is real in memory and absent from disk until app_save_all
+      runs, and a caller who does not know that sees a tool that reported
+      success and changed no file. }
+    NoteNextStep('This edit is in memory only. Run app_save_all to write '
+        + 'it to disk, and check still_dirty in the reply.');
+
     Workspace := GetWorkspace;
     If Workspace <> Nil Then
     Begin
@@ -10080,10 +10089,37 @@ Begin
     Result := ExtractJsonValue(Response, Key);
 End;
 
+{ Which library actions only LOOK, and so must leave the active document  }
+{ where they found it.                                                     }
+{                                                                          }
+{ Listed by name rather than inferred, because there is no property of a   }
+{ handler this can read to tell reading from writing. The cost of the list }
+{ going stale is a read that moves focus again, which is the bug it exists }
+{ to prevent, so a new read-only handler belongs here on the day it is     }
+{ written.                                                                 }
+{                                                                          }
+{ Writes are deliberately absent. Library authoring is a sequence of calls }
+{ against a current component: lib_add_pins and the Lib_AddFootprint*      }
+{ family read the focus the call before them left, so restoring it after a }
+{ write would break the flow the bridge is built on. }
+Function LibActionIsReadOnly(Action : String) : Boolean;
+Begin
+    Result := (Action = 'get_footprints')
+           Or (Action = 'get_footprint_pads')
+           Or (Action = 'get_library_geometry')
+           Or (Action = 'get_component_details')
+           Or (Action = 'get_pad_geometry')
+           Or (Action = 'probe_footprint')
+           Or (Action = 'probe_designator')
+           Or (Action = 'audit_styles')
+           Or (Action = 'search');
+End;
+
 Function HandleLibraryCommand(Action : String; Params : String; RequestId : String) : String;
 Var
     SweepLibs, SweepAction, OnePath, OneParams, OneReply : String;
     ItemsJson, DataJson, ErrJson, OkStr : String;
+    SavedFocus : String;
     BarPos, Succeeded, FailedCount : Integer;
     FirstItem : Boolean;
 Begin
@@ -10211,6 +10247,14 @@ Begin
         Exit;
     End;
 
+    { Remember where the caller was looking, for the reads that are about to
+      focus a library to answer. Captured HERE rather than inside each
+      handler because they exit from several places apiece, and a restore
+      that only runs on the success path leaves the focus moved on exactly
+      the calls that already went wrong. }
+    SavedFocus := '';
+    If LibActionIsReadOnly(Action) Then SavedFocus := CurrentFocusedDocPath;
+
     Case Action Of
         'create_symbol':        Result := Lib_CreateSymbol(Params, RequestId);
         'add_pin':              Result := Lib_AddPin(Params, RequestId);
@@ -10277,4 +10321,8 @@ Begin
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown library action: ' + Action);
     End;
+
+    { Put the caller's document back. A no-op unless a read actually moved
+      it, and it runs whether the handler succeeded or refused. }
+    RestoreFocusedDoc(SavedFocus);
 End;
