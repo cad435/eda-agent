@@ -21,6 +21,7 @@ Var
     Via   : IPCB_Via;
     Comp  : IPCB_Component;
     Txt   : IPCB_Text;
+    Rgn   : IPCB_Region;
     Oid   : Integer;
 Begin
     Result := '';
@@ -140,6 +141,29 @@ Begin
         Else If PropName = 'Text' Then
         Begin
             If Oid = eTextObject Then Begin Txt := Obj; Result := Txt.Text; End;
+        End
+        { A REGION'S KIND IS WHAT MAKES IT A BOARD CUTOUT, and nothing
+          here could see it. Reported from a live board as the flag not
+          being reachable through this API; it is
+            Property Kind : TRegionKind Read GetState_Kind
+                                        Write SetState_Kind;
+          and we had simply never exposed it.
+
+          Returned as a word rather than an ordinal. The numbers are not
+          documented anywhere this project can verify, and publishing an
+          unverified number invites a caller to write it back. }
+        Else If (PropName = 'Kind') Or (PropName = 'RegionKind') Then
+        Begin
+            If Oid = eRegionObject Then
+            Begin
+                Rgn := Obj;
+                If Rgn.Kind = eRegionKind_BoardCutout Then Result := 'board_cutout'
+                Else If Rgn.Kind = eRegionKind_Cutout Then Result := 'cutout'
+                Else If Rgn.Kind = eRegionKind_Copper Then Result := 'copper'
+                Else If Rgn.Kind = eRegionKind_NamedRegion Then Result := 'named_region'
+                Else If Rgn.Kind = eRegionKind_Cavity Then Result := 'cavity'
+                Else Result := 'unknown';
+            End;
         End;
     Except
         Result := '';
@@ -150,18 +174,58 @@ End;
 { PCB Property Setter                                                        }
 {..............................................................................}
 
-Procedure SetPCBProperty(Obj : IPCB_Primitive; PropName : String; Value : String);
+{ Returns: 1 = handled, 0 = unknown property name, -1 = write threw.        }
+{                                                                           }
+{ THIS USED TO BE A Procedure, and that is the whole bug. It reported       }
+{ nothing, so a caller could not tell a property this build writes from one }
+{ it has never heard of, and modify_objects answered with a match count     }
+{ either way. Measured on a live board: setting RemoveDead on a polygon     }
+{ came back matched:2 having written nothing, and the operator reasonably   }
+{ concluded the property was not writable. It is:                           }
+{ IPCB_Polygon declares                                                     }
+{   Property RemoveDead : Boolean Read GetState_RemoveDead                  }
+{                                 Write SetState_RemoveDead;                }
+{ There was simply no case for it here.                                     }
+{                                                                           }
+{ The schematic writer was given this contract and the PCB one was not, so  }
+{ the same class of silent failure survived on this side. Both now feed the }
+{ one buffer in Utils.                                                       }
+Function SetPCBProperty(Obj : IPCB_Primitive; PropName : String; Value : String) : Integer;
 Var
     Track : IPCB_Track;
     Pad   : IPCB_Pad;
     Comp  : IPCB_Component;
     Txt   : IPCB_Text;
+    Poly  : IPCB_Polygon;
+    Body  : IPCB_ComponentBody;
+    Rgn   : IPCB_Region;
     Oid   : Integer;
+    Matched : Boolean;
 Begin
+    Result := 0;
+    Matched := True;
     Try
         Oid := Obj.ObjectId;
         { Base members, settable on any primitive. }
-        If PropName = 'X'             Then Obj.x := MilsToCoord(StrToIntDef(Value, 0))
+        { A COMPONENT BODY IS MOVED, NOT ASSIGNED.
+          Writing x or y on a body is not something this codebase has
+          done successfully, and the one time it tried, the PCB engine
+          went down with an access violation. MoveByXY is inherited from
+          IPCB_Primitive, PCB_ReplicateLayout already calls it, and
+          Lib_Link3DModel positions bodies with it, so it is the proven
+          route. The delta is taken from where the body actually is.
+
+          Checked before the generic branch because that branch is the
+          assignment being avoided. }
+        If ((PropName = 'X') Or (PropName = 'Y'))
+           And (Oid = eComponentBodyObject) Then
+        Begin
+            If PropName = 'X' Then
+                Obj.MoveByXY(MilsToCoord(StrToIntDef(Value, 0)) - Obj.x, 0)
+            Else
+                Obj.MoveByXY(0, MilsToCoord(StrToIntDef(Value, 0)) - Obj.y);
+        End
+        Else If PropName = 'X'        Then Obj.x := MilsToCoord(StrToIntDef(Value, 0))
         Else If PropName = 'Y'        Then Obj.y := MilsToCoord(StrToIntDef(Value, 0))
         Else If PropName = 'Layer'    Then Obj.Layer := GetLayerFromString(Value)
         Else If PropName = 'Selected' Then Obj.Selected := StrToBool(Value)
@@ -206,9 +270,79 @@ Begin
         Else If PropName = 'Text' Then
         Begin
             If Oid = eTextObject Then Begin Txt := Obj; Txt.Text := Value; End;
-        End;
+        End
+
+        { Polygon pour options. All three are declared on IPCB_Polygon with
+          both a Read and a Write accessor, so they are settable; they were
+          simply absent here. Setting one does NOT repour: the flags decide
+          what the NEXT pour does, so pcb_repour_polygons has to follow. }
+        { The body's own writable members, from its declared interface:
+          Property StandoffHeight : TCoord Read GetStandoffHeight
+                                           Write SetStandoffHeight;
+          and the same shape for OverallHeight. Identifier is read-only
+          and is deliberately absent. }
+        Else If PropName = 'StandoffHeight' Then
+        Begin
+            If Oid = eComponentBodyObject Then
+            Begin Body := Obj; Body.StandoffHeight := MilsToCoord(StrToIntDef(Value, 0)); End
+            Else Matched := False;
+        End
+        Else If PropName = 'OverallHeight' Then
+        Begin
+            If Oid = eComponentBodyObject Then
+            Begin Body := Obj; Body.OverallHeight := MilsToCoord(StrToIntDef(Value, 0)); End
+            Else Matched := False;
+        End
+        { Turning a region INTO a board cutout, the other half of the
+          read above. The five identifiers are attested: four independent
+          scripts in reference/ compare against them, so they exist in
+          DelphiScript. What none of them does is ASSIGN one, so the
+          write is unproven in the way StandoffHeight is, and it is
+          ranked accordingly in the release procedure.
+
+          If/Else If rather than Case, because Case on an enum crashes
+          the script engine here. }
+        Else If (PropName = 'Kind') Or (PropName = 'RegionKind') Then
+        Begin
+            If Oid = eRegionObject Then
+            Begin
+                Rgn := Obj;
+                If Value = 'board_cutout' Then Rgn.Kind := eRegionKind_BoardCutout
+                Else If Value = 'cutout' Then Rgn.Kind := eRegionKind_Cutout
+                Else If Value = 'copper' Then Rgn.Kind := eRegionKind_Copper
+                Else If Value = 'named_region' Then Rgn.Kind := eRegionKind_NamedRegion
+                Else If Value = 'cavity' Then Rgn.Kind := eRegionKind_Cavity
+                Else Matched := False;
+            End
+            Else Matched := False;
+        End
+        Else If PropName = 'RemoveDead' Then
+        Begin
+            If Oid = ePolyObject Then
+            Begin Poly := Obj; Poly.RemoveDead := StrToBool(Value); End
+            Else Matched := False;
+        End
+        Else If PropName = 'RemoveNarrowNecks' Then
+        Begin
+            If Oid = ePolyObject Then
+            Begin Poly := Obj; Poly.RemoveNarrowNecks := StrToBool(Value); End
+            Else Matched := False;
+        End
+        Else If PropName = 'RemoveIslandsByArea' Then
+        Begin
+            If Oid = ePolyObject Then
+            Begin Poly := Obj; Poly.RemoveIslandsByArea := StrToBool(Value); End
+            Else Matched := False;
+        End
+        Else Matched := False;
+
+        If Matched Then Result := 1 Else Result := 0;
     Except
+        Result := -1;
     End;
+
+    If Result = 0 Then NotePropertyDiag('unknown', PropName)
+    Else If Result = -1 Then NotePropertyDiag('failed', PropName);
 End;
 
 {..............................................................................}
@@ -508,6 +642,10 @@ Begin
         Result := BuildSuccessResponse(RequestId,
             '{"objects":[' + JsonItems + '],"count":' + IntToStr(TotalMatched) + '}')
     Else
+        { matched counts what the FILTER selected, and said nothing about
+          whether a property write landed. The tail reports that, the same
+          way the schematic modify replies do. }
         Result := BuildSuccessResponse(RequestId,
-            '{"matched":' + IntToStr(TotalMatched) + '}');
+            '{"matched":' + IntToStr(TotalMatched)
+            + ModifyOutcomeJson + '}');
 End;

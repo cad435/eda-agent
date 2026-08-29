@@ -7,148 +7,78 @@
 { These provide a thin, generic layer so Python controls all logic.          }
 {..............................................................................}
 
-{..............................................................................}
-{ Property-write diagnostics                                                  }
-{                                                                              }
-{ SetSchProperty appends here every time a property name is not recognised  }
-{ or a write throws, so batch_modify can stop silently swallowing            }
-{ "set=Description=..." style mis-spellings. The bridge is single-request,   }
-{ so a module-level buffer is safe. Other handlers that call SetSchProperty }
-{ via ApplySetProperties simply ignore it.                                   }
-{..............................................................................}
-
-Var
-    _PropertyDiagStr : String;
-
-{ Buffer is a String, not a TStringList. DelphiScript drops class-method  }
-{ visibility on TStringList declared at module scope (Undeclared          }
-{ identifier: Count on `_Buf.Count`), and on TStringList returned by a    }
-{ Function, even though the equivalent declared as a Function local works.}
-{ A pipe-delimited String avoids the entire trap.                          }
-{                                                                            }
-{ Each record is "kind:propname"; records are joined with '|'.            }
-
-Procedure ResetPropertyDiag;
-Begin
-    _PropertyDiagStr := '';
-End;
-
-Procedure NotePropertyDiag(Kind : String; PropName : String);
-{ Dedup so a 50-row modify with one bad prop name records it once, not 50x. }
-Var
-    Entry : String;
-Begin
-    Entry := Kind + ':' + PropName;
-    { Bracket the buffer with '|' on both sides so a Pos check finds an      }
-    { exact record (and not e.g. "unknown:Foo" matching inside "...Foobar"). }
-    If Pos('|' + Entry + '|', '|' + _PropertyDiagStr + '|') > 0 Then Exit;
-    If _PropertyDiagStr = '' Then
-        _PropertyDiagStr := Entry
-    Else
-        _PropertyDiagStr := _PropertyDiagStr + '|' + Entry;
-End;
-
-Function AnyPropertyDiag : Boolean;
-Begin
-    Result := _PropertyDiagStr <> '';
-End;
-
-Function RenderPropertyDiagJson : String;
-Var
-    UJson, FJson, Remaining, Entry, Kind, Nm : String;
-    UCount, FCount, P : Integer;
-Begin
-    UJson := '['; UCount := 0;
-    FJson := '['; FCount := 0;
-    Remaining := _PropertyDiagStr;
-    While Length(Remaining) > 0 Do
-    Begin
-        P := Pos('|', Remaining);
-        If P = 0 Then
-        Begin
-            Entry := Remaining;
-            Remaining := '';
-        End
-        Else
-        Begin
-            Entry := Copy(Remaining, 1, P - 1);
-            Remaining := Copy(Remaining, P + 1, Length(Remaining));
-        End;
-        P := Pos(':', Entry);
-        If P = 0 Then Continue;
-        Kind := Copy(Entry, 1, P - 1);
-        Nm := Copy(Entry, P + 1, Length(Entry));
-        If Kind = 'unknown' Then
-        Begin
-            If UCount > 0 Then UJson := UJson + ',';
-            UJson := UJson + '"' + EscapeJsonString(Nm) + '"';
-            Inc(UCount);
-        End
-        Else If Kind = 'failed' Then
-        Begin
-            If FCount > 0 Then FJson := FJson + ',';
-            FJson := FJson + '"' + EscapeJsonString(Nm) + '"';
-            Inc(FCount);
-        End;
-    End;
-    UJson := UJson + ']';
-    FJson := FJson + ']';
-    Result := '{"unknown_count":' + IntToStr(UCount)
-            + ',"unknown":' + UJson
-            + ',"failed_count":' + IntToStr(FCount)
-            + ',"failed":' + FJson + '}';
-End;
-
-{ The tail every modify reply carries, so what was WRITTEN is reported      }
-{ alongside what was matched.                                               }
-{                                                                           }
-{ MEASURED: obj_modify was asked to set a sheet symbol's FileName and       }
-{ answered matched:1, saved:true three times over while writing nothing.    }
-{ That property is readable and has no case in the writer, so every attempt }
-{ was recorded here as an unknown name and then discarded, because only     }
-{ batch_modify ever rendered this buffer. Nothing in the reply distinguished }
-{ it from a real one, and an operator spent a session working around a      }
-{ rename that had never happened.                                           }
-{                                                                           }
-{ matched counts what the FILTER selected. It says nothing about whether a  }
-{ property write landed, so reporting it alone made a mis-spelled or        }
-{ unsupported name indistinguishable from success.                          }
-Function ModifyOutcomeJson : String;
-Begin
-    Result := ',"properties":' + RenderPropertyDiagJson;
-    If _PropertyDiagStr <> '' Then
-        Result := Result + ',"success":false,"reason":"one or more properties '
-            + 'were not written. properties.unknown lists names this build '
-            + 'does not write, properties.failed lists writes that threw."'
-    Else
-        Result := Result + ',"success":true';
-End;
 
 {..............................................................................}
 { Object Type Mapping                                                         }
 {..............................................................................}
 
 Function ObjectTypeFromString(TypeStr : String) : Integer;
+Var
+    N : String;
 Begin
     Result := -1;
-    If TypeStr = 'eNetLabel'      Then Result := eNetLabel
-    Else If TypeStr = 'ePort'          Then Result := ePort
-    Else If TypeStr = 'ePowerObject'   Then Result := ePowerObject
-    Else If TypeStr = 'eSchComponent'  Then Result := eSchComponent
-    Else If TypeStr = 'eWire'          Then Result := eWire
-    Else If TypeStr = 'eBus'           Then Result := eBus
-    Else If TypeStr = 'eBusEntry'      Then Result := eBusEntry
-    Else If TypeStr = 'eParameter'     Then Result := eParameter
-    Else If TypeStr = 'eParameterSet'  Then Result := eParameterSet
-    Else If TypeStr = 'ePin'           Then Result := ePin
-    Else If TypeStr = 'eLabel'         Then Result := eLabel
-    Else If TypeStr = 'eLine'          Then Result := eLine
-    Else If TypeStr = 'eRectangle'     Then Result := eRectangle
-    Else If TypeStr = 'eSheetSymbol'   Then Result := eSheetSymbol
-    Else If TypeStr = 'eSheetEntry'    Then Result := eSheetEntry
-    Else If TypeStr = 'eNoERC'         Then Result := eNoERC
-    Else If TypeStr = 'eJunction'      Then Result := eJunction
-    Else If TypeStr = 'eImage'         Then Result := eImage;
+    N := NormalizeTypeName(TypeStr);
+    If N = 'netlabel'        Then Result := eNetLabel
+    Else If N = 'port'            Then Result := ePort
+    Else If N = 'powerobject'     Then Result := ePowerObject
+    Else If N = 'powerport'       Then Result := ePowerObject
+    Else If N = 'schcomponent'    Then Result := eSchComponent
+    { A schematic caller who writes "component" means this one. The PCB
+      resolver maps the same word to eComponentObject, and obj_query
+      tries the schematic first, so the document in front decides. }
+    Else If N = 'component'       Then Result := eSchComponent
+    Else If N = 'wire'            Then Result := eWire
+    Else If N = 'bus'             Then Result := eBus
+    Else If N = 'busentry'        Then Result := eBusEntry
+    Else If N = 'parameter'       Then Result := eParameter
+    Else If N = 'parameterset'    Then Result := eParameterSet
+    Else If N = 'pin'             Then Result := ePin
+    Else If N = 'label'           Then Result := eLabel
+    Else If N = 'line'            Then Result := eLine
+    Else If N = 'rectangle'       Then Result := eRectangle
+    Else If N = 'sheetsymbol'     Then Result := eSheetSymbol
+    Else If N = 'sheetentry'      Then Result := eSheetEntry
+    Else If N = 'noerc'           Then Result := eNoERC
+    Else If N = 'junction'        Then Result := eJunction
+    Else If N = 'image'           Then Result := eImage;
+End;
+
+{ What the refusal should have said. }
+Function SchObjectTypeNames : String;
+Begin
+    Result := 'eNetLabel, ePort, ePowerObject, eSchComponent, eWire, eBus, '
+            + 'eBusEntry, eParameter, eParameterSet, ePin, eLabel, eLine, '
+            + 'eRectangle, eSheetSymbol, eSheetEntry, eNoERC, eJunction, '
+            + 'eImage';
+End;
+
+{ The refusal itself, in one place.                                          }
+{                                                                             }
+{ "Unknown object type: Sheet" is true and leaves the caller guessing, and    }
+{ the guesses observed were Component, Sheet, Sheet Symbol and SheetSymbol    }
+{ in a row. Three of those four now resolve. The fourth does not, because a   }
+{ sheet is a DOCUMENT rather than an object on one, and saying so is more     }
+{ use than accepting it and returning nothing.                                }
+Function UnknownObjectTypeMessage(TypeStr : String) : String;
+Var
+    N : String;
+Begin
+    N := NormalizeTypeName(TypeStr);
+    Result := 'Unknown object type: ' + TypeStr + '. ';
+    If (N = 'sheet') Or (N = 'schdoc') Or (N = 'document') Then
+        Result := Result + 'A sheet is a document, not an object on one. '
+                + 'For the symbol that REFERENCES a child sheet use '
+                + 'eSheetSymbol; to list documents use proj_list_documents. '
+    Else If (N = 'net') Or (N = 'netclass') Then
+        Result := Result + 'Nets are not schematic objects. Read them with '
+                + 'proj_get_nets, or query eNetLabel for the labels. '
+    Else If (N = 'polygon') Or (N = 'poly') Or (N = 'track') Or (N = 'via') Then
+        Result := Result + 'That is a PCB type and this document is a '
+                + 'schematic. The pcb_ tools act on an open .PcbDoc. ';
+    Result := Result + 'Schematic types: ' + SchObjectTypeNames
+            + '. PCB types: ' + PCBObjectTypeNames
+            + '. Spelling is forgiving: case, spaces, underscores and the '
+            + 'leading "e" are all optional.';
 End;
 
 {..............................................................................}
@@ -1414,7 +1344,7 @@ Begin
         Exit;
     End;
 
-    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', 'Unknown object type: ' + ObjTypeStr);
+    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', UnknownObjectTypeMessage(ObjTypeStr));
 End;
 
 {..............................................................................}
@@ -1471,7 +1401,7 @@ Begin
         Exit;
     End;
 
-    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', 'Unknown object type: ' + ObjTypeStr);
+    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', UnknownObjectTypeMessage(ObjTypeStr));
 End;
 
 {..............................................................................}
@@ -1496,7 +1426,7 @@ Begin
     ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
     If ObjTypeInt = -1 Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', 'Unknown object type: ' + ObjTypeStr);
+        Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', UnknownObjectTypeMessage(ObjTypeStr));
         Exit;
     End;
 
@@ -1595,7 +1525,7 @@ Begin
         Exit;
     End;
 
-    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', 'Unknown object type: ' + ObjTypeStr);
+    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', UnknownObjectTypeMessage(ObjTypeStr));
 End;
 
 {..............................................................................}
@@ -1747,7 +1677,7 @@ Begin
         Exit;
     End;
 
-    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', 'Unknown object type: ' + ObjTypeStr);
+    Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', UnknownObjectTypeMessage(ObjTypeStr));
 End;
 
 {..............................................................................}
@@ -4267,7 +4197,7 @@ Begin
     ObjTypeInt := ObjectTypeFromString(ObjTypeStr);
     If ObjTypeInt = -1 Then
     Begin
-        Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', 'Unknown object type: ' + ObjTypeStr);
+        Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', UnknownObjectTypeMessage(ObjTypeStr));
         Exit;
     End;
 
@@ -4343,7 +4273,7 @@ Begin
         ObjTypeInt := ObjectTypeFromStringPCB(ObjTypeStr);
         If ObjTypeInt = -1 Then
         Begin
-            Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', 'Unknown object type: ' + ObjTypeStr);
+            Result := BuildErrorResponse(RequestId, 'INVALID_TYPE', UnknownObjectTypeMessage(ObjTypeStr));
             Exit;
         End;
 

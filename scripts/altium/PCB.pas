@@ -4202,6 +4202,192 @@ End;
 {         low_layer=<layer>, high_layer=<layer>                              }
 {..............................................................................}
 
+{..............................................................................}
+{ PCB_Place3DBody - put a STEP model straight onto the open board.             }
+{                                                                              }
+{ WHY THIS EXISTS. lib_link_3d_model was the only STEP importer in the whole   }
+{ toolset and it writes into a .PcbLib footprint, so a caller who wanted a     }
+{ model on a BOARD had to invent a library, author a footprint, place it as a  }
+{ component and delete the lot afterwards. Measured: a session did exactly     }
+{ that, could not see the result because probing the library had moved the     }
+{ active document, and reasonably concluded the API could not do it. Altium    }
+{ can: Place > 3D Body > Generic STEP Model is a free body on the document.    }
+{                                                                              }
+{ The call sequence is the one Lib_Link3DModel already uses, minus the         }
+{ footprint binding: factory, load the model, SetState_FromModel, assign,      }
+{ add to the board, register. Every identifier here is exercised there, which  }
+{ is the whole reason to copy the shape rather than improve on it.             }
+{                                                                              }
+{ ROTATION IS NOT ACCEPTED, and that is deliberate. IPCB_ComponentBody exposes }
+{ no Rotation on AD26 26.9.1.9: assigning it raised "Undeclared identifier",   }
+{ which DelphiScript cannot catch, and it took the polling loop down. The      }
+{ rotation lives on the MODEL via SetState(90,0,0,0), whose four arguments are }
+{ documented nowhere this project can verify. Guessing them would repeat that. }
+{                                                                              }
+{ NO identifier PARAMETER EITHER, for the same reason and caught the same    }
+{ way. IPCB_ComponentBody declares                                            }
+{   Property Identifier : TPCBString Read GetState_Identifier;                }
+{ with no Write accessor, so naming the body from here is not on offer. It    }
+{ was written and removed before shipping, on the strength of reading the     }
+{ declaration rather than assuming the property was symmetric.                }
+{                                                                             }
+{ Params: model_path (required), x, y (mils), layer (default TopLayer),       }
+{         standoff_height (mils).                                             }
+{..............................................................................}
+
+Function PCB_Place3DBody(Params : String; RequestId : String) : String;
+Var
+    Board : IPCB_Board;
+    Body : IPCB_ComponentBody;
+    Model : IPCB_Model;
+    ModelPath, LayerStr, Why : String;
+    BodyX, BodyY, Standoff, CurX, CurY : Integer;
+    DidStandoff, DidMove : Boolean;
+    ReadBackX, ReadBackY : Integer;
+Begin
+    ModelPath := ExtractJsonValue(Params, 'model_path');
+    If ModelPath = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAMS',
+            'model_path is required');
+        Exit;
+    End;
+
+    { Checked before anything is created. ModelFactory_FromFilename on a
+      path that is not there returns Nil and leaves an orphan body behind,
+      and "could not load" is a worse answer than "no such file". }
+    If Not FileExists(ModelPath) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'FILE_NOT_FOUND',
+            'No file at ' + ModelPath);
+        Exit;
+    End;
+
+    Board := GetPCBBoardForMutation(Why);
+    If Board = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_PCB', Why);
+        Exit;
+    End;
+
+    BodyX := StrToIntDef(ExtractJsonValue(Params, 'x'), 0);
+    BodyY := StrToIntDef(ExtractJsonValue(Params, 'y'), 0);
+    Standoff := Round(StrToFloatDef(ExtractJsonValue(Params, 'standoff_height'), 0));
+    LayerStr := ExtractJsonValue(Params, 'layer');
+    If LayerStr = '' Then LayerStr := 'TopLayer';
+
+    DidStandoff := False;
+    DidMove := False;
+
+    PCBServer.PreProcess;
+    Try
+        Body := PCBServer.PCBObjectFactory(eComponentBodyObject, eNoDimension,
+            eCreate_Default);
+        If Body = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'CREATE_FAILED',
+                'PCBObjectFactory returned Nil for eComponentBodyObject');
+            Exit;
+        End;
+
+        Model := Body.ModelFactory_FromFilename(ModelPath, False);
+        If Model = Nil Then
+        Begin
+            Result := BuildErrorResponse(RequestId, 'MODEL_LOAD_FAILED',
+                'Could not load a 3D model from ' + ModelPath
+                + '. The file exists, so it is the format Altium refused.');
+            Exit;
+        End;
+
+        Body.SetState_FromModel;
+        Body.Model := Model;
+
+        { ADD IT TO THE BOARD BEFORE TOUCHING ANY PROPERTY.
+          MEASURED, by crashing Altium: an earlier version of this set
+          Layer, x, y and StandoffHeight on the body while it still
+          belonged to nothing, and the PCB engine went down with
+          "Access violation ... Read of address 0x20" inside ADVPCB.DLL.
+          A null dereference at a small field offset is a setter reaching
+          into state an owning board is supposed to provide.
+
+          The reference does it in this order and so does
+          Lib_Link3DModel: factory, load, SetState_FromModel, assign the
+          model, ADD, register, and only then adjust. This handler's own
+          comment claimed to copy that sequence and did not. }
+        Board.AddPCBObject(Body);
+        PCBServer.SendMessageToRobots(Board.I_ObjectAddress, c_Broadcast,
+            PCBM_BoardRegisteration, Body.I_ObjectAddress);
+
+        Try Body.Layer := GetLayerFromString(LayerStr); Except End;
+
+        { MOVED, NOT ASSIGNED. Lib_Link3DModel positions a body with
+          MoveByXY, which is inherited from IPCB_Primitive and already
+          called by PCB_ReplicateLayout, so it cannot be an undeclared
+          identifier. Writing x and y directly on a body is not something
+          this codebase has ever done successfully, and it was the other
+          half of the crash.
+
+          The delta is computed from where the factory actually put the
+          body rather than assuming it starts at the origin. }
+        Try
+            CurX := CoordToMils(Body.x);
+            CurY := CoordToMils(Body.y);
+        Except
+            CurX := 0;
+            CurY := 0;
+        End;
+        If (BodyX <> CurX) Or (BodyY <> CurY) Then
+            Try
+                Body.MoveByXY(MilsToCoord(BodyX - CurX),
+                              MilsToCoord(BodyY - CurY));
+                DidMove := True;
+            Except End;
+
+        If Standoff <> 0 Then
+            Try
+                Body.StandoffHeight := MilsToCoord(Standoff);
+                DidStandoff := True;
+            Except End;
+    Finally
+        PCBServer.PostProcess;
+    End;
+
+    { READ THE POSITION BACK. The placement is the one thing a caller cannot
+      check without opening the 3D view, and this tool exists because a
+      session spent a long time unable to see whether anything had landed. }
+    ReadBackX := BodyX;
+    ReadBackY := BodyY;
+    Try
+        ReadBackX := CoordToMils(Body.x);
+        ReadBackY := CoordToMils(Body.y);
+    Except End;
+
+    SaveDocByPath(Board.FileName);
+
+    { The one thing a caller cannot check from here. }
+    NoteNextStep('Look at it before trusting the placement: obj_switch_view '
+        + '3d. The body sits at the model''s own origin, so where it lands '
+        + 'depends on how the STEP was authored. obj_modify on '
+        + 'eComponentBodyObject moves it, and obj_delete removes it.');
+
+    Result := BuildSuccessResponse(RequestId,
+        JsonObj(
+            JsonBool('success', True) + ',' +
+            JsonStr('model_path', ModelPath) + ',' +
+            JsonInt('x', ReadBackX) + ',' +
+            JsonInt('y', ReadBackY) + ',' +
+            JsonStr('layer', LayerStr) + ',' +
+            JsonInt('standoff_height', Standoff) + ',' +
+            JsonBool('standoff_applied', DidStandoff) + ',' +
+            JsonBool('moved', DidMove) + ',' +
+            JsonBool('rotation_applied', False) + ',' +
+            JsonStr('note', 'rotation is not settable from here: '
+                + 'IPCB_ComponentBody exposes no Rotation, and the model-level '
+                + 'SetState signature is undocumented. Rotate in the editor if '
+                + 'the orientation is wrong.')
+        ));
+End;
+
 Function PCB_PlaceVia(Params : String; RequestId : String) : String;
 Var
     Board : IPCB_Board;
@@ -6154,10 +6340,12 @@ Var
     Iterator : IPCB_BoardIterator;
     Polygon : IPCB_Polygon;
     IndexStr, NetStr, LayerStr, HatchStr : String;
+    DeadStr, NecksStr, IslandsStr : String;
+    Changed, Failed : String;
     TargetIdx, CurIdx : Integer;
     FoundPoly : IPCB_Polygon;
     FoundNet : IPCB_Net;
-    Found : Boolean;
+    Found, Want : Boolean;
 Begin
     Board := GetPCBBoardAnywhere;
     If Board = Nil Then
@@ -6170,6 +6358,11 @@ Begin
     NetStr := ExtractJsonValue(Params, 'net');
     LayerStr := ExtractJsonValue(Params, 'layer');
     HatchStr := ExtractJsonValue(Params, 'hatch_style');
+    DeadStr := ExtractJsonValue(Params, 'remove_dead');
+    NecksStr := ExtractJsonValue(Params, 'remove_narrow_necks');
+    IslandsStr := ExtractJsonValue(Params, 'remove_islands_by_area');
+    Changed := '';
+    Failed := '';
 
     If IndexStr = '' Then
     Begin
@@ -6219,29 +6412,87 @@ Begin
         PCBServer.SendMessageToRobots(FoundPoly.I_ObjectAddress, c_Broadcast,
             PCBM_BeginModify, c_NoEventData);
 
-        // Modify net
+        // Modify net. A name that resolves to nothing is REPORTED. It used
+        // to leave the net alone and still answer modified:true, so a typo
+        // in a net name read as a successful reassignment.
         If NetStr <> '' Then
         Begin
             FoundNet := FindNetByName(Board, NetStr);
             If FoundNet <> Nil Then
+            Begin
                 FoundPoly.Net := FoundNet;
+                AddChangedField(Changed, 'net');
+            End
+            Else
+                AddFailReason(Failed, 'net',
+                    'no net named "' + NetStr + '" on this board');
         End;
 
         // Modify layer
         If LayerStr <> '' Then
+        Begin
             FoundPoly.Layer := GetLayerFromString(LayerStr);
+            AddChangedField(Changed, 'layer');
+        End;
 
-        // Modify hatch style
+        // Modify hatch style.
+        //
+        // FOUR WORDS, NOT SIX. The tool used to document Horizontal and
+        // Vertical as well, and no branch here ever handled them, so asking
+        // for one changed nothing and reported success. They are not added
+        // rather than removed because this codebase uses exactly four hatch
+        // members and the published reference lists no enum for the type:
+        // inventing an identifier that DelphiScript does not declare would
+        // fault where Try/Except cannot catch it and stop the polling loop.
         If HatchStr <> '' Then
         Begin
             If HatchStr = 'Solid' Then
-                FoundPoly.PolyHatchStyle := ePolySolid
+            Begin FoundPoly.PolyHatchStyle := ePolySolid; AddChangedField(Changed, 'hatch_style'); End
             Else If HatchStr = 'NoHatch' Then
-                FoundPoly.PolyHatchStyle := ePolyNoHatch
+            Begin FoundPoly.PolyHatchStyle := ePolyNoHatch; AddChangedField(Changed, 'hatch_style'); End
             Else If HatchStr = '45Degree' Then
-                FoundPoly.PolyHatchStyle := ePolyHatch45
+            Begin FoundPoly.PolyHatchStyle := ePolyHatch45; AddChangedField(Changed, 'hatch_style'); End
             Else If HatchStr = '90Degree' Then
-                FoundPoly.PolyHatchStyle := ePolyHatch90;
+            Begin FoundPoly.PolyHatchStyle := ePolyHatch90; AddChangedField(Changed, 'hatch_style'); End
+            Else
+                AddFailReason(Failed, 'hatch_style',
+                    'unknown style "' + HatchStr + '". Use Solid, NoHatch, '
+                    + '45Degree or 90Degree');
+        End;
+
+        // Pour options. These decide what the NEXT pour does; none of them
+        // repours on its own, which is why the reply says so and the tool
+        // points at pcb_repour_polygons.
+        //
+        // Each is read back rather than assumed. Reported absent from this
+        // API once already, on the strength of a modify that answered with a
+        // match count and wrote nothing.
+        If DeadStr <> '' Then
+        Begin
+            Want := StrToBool(DeadStr);
+            FoundPoly.RemoveDead := Want;
+            If FoundPoly.RemoveDead = Want Then
+                AddChangedField(Changed, 'remove_dead')
+            Else
+                AddFailReason(Failed, 'remove_dead', 'the flag did not take');
+        End;
+        If NecksStr <> '' Then
+        Begin
+            Want := StrToBool(NecksStr);
+            FoundPoly.RemoveNarrowNecks := Want;
+            If FoundPoly.RemoveNarrowNecks = Want Then
+                AddChangedField(Changed, 'remove_narrow_necks')
+            Else
+                AddFailReason(Failed, 'remove_narrow_necks', 'the flag did not take');
+        End;
+        If IslandsStr <> '' Then
+        Begin
+            Want := StrToBool(IslandsStr);
+            FoundPoly.RemoveIslandsByArea := Want;
+            If FoundPoly.RemoveIslandsByArea = Want Then
+                AddChangedField(Changed, 'remove_islands_by_area')
+            Else
+                AddFailReason(Failed, 'remove_islands_by_area', 'the flag did not take');
         End;
 
         PCBServer.SendMessageToRobots(FoundPoly.I_ObjectAddress, c_Broadcast,
@@ -6252,10 +6503,28 @@ Begin
 
     SaveDocByPath(Board.FileName);
 
+    { The pour options and the hatch style decide what the NEXT pour does, }
+    { so the copper is unchanged until this runs. Reported from a live     }
+    { board as the setting "not applying".                                  }
+    If Changed <> '' Then
+        NoteNextStep('Nothing is repoured yet. Run pcb_repour_polygons to '
+            + 'apply these options to the copper.');
+
+    { modified reports whether anything actually changed, not whether the  }
+    { call ran. An index that resolves and a request that is entirely      }
+    { ignored used to look identical from here.                            }
     Result := BuildSuccessResponse(RequestId,
-        '{"modified":true,'
-        + '"index":' + IntToStr(TargetIdx) + ','
-        + '"name":"' + EscapeJsonString(FoundPoly.Name) + '"}');
+        JsonObj(
+            JsonBool('modified', Changed <> '') + ',' +
+            JsonBool('success', Failed = '') + ',' +
+            JsonInt('index', TargetIdx) + ',' +
+            JsonStr('name', FoundPoly.Name) + ',' +
+            JsonRaw('changed', '[' + Changed + ']') + ',' +
+            JsonRaw('not_applied', '[' + Failed + ']') + ',' +
+            JsonBool('repour_needed', Changed <> '') + ',' +
+            JsonStr('note', 'pour options and hatch style take effect on the '
+                + 'next pour. Run pcb_repour_polygons to see them.')
+        ));
 End;
 
 {..............................................................................}
@@ -11982,6 +12251,7 @@ Begin
         'set_layer_visibility':    Result := PCB_SetLayerVisibility(Params, RequestId);
         'repour_polygons':         Result := PCB_RepourPolygons(Params, RequestId);
         'place_via':               Result := PCB_PlaceVia(Params, RequestId);
+        'place_3d_body':           Result := PCB_Place3DBody(Params, RequestId);
         'place_track':             Result := PCB_PlaceTrack(Params, RequestId);
         'place_tracks':            Result := PCB_PlaceTracks(Params, RequestId);
         'place_arc':               Result := PCB_PlaceArc(Params, RequestId);

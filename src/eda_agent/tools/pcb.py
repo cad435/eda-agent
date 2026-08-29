@@ -4857,25 +4857,49 @@ def register_pcb_tools(mcp):
         net: str = "",
         layer: str = "",
         hatch_style: str = "",
+        remove_dead: Optional[bool] = None,
+        remove_narrow_necks: Optional[bool] = None,
+        remove_islands_by_area: Optional[bool] = None,
     ) -> dict[str, Any]:
-        """Modify a polygon pour's properties.
+        """Modify a polygon pour's properties and its pour options.
 
-        Changes net, layer, or hatching style of an existing polygon pour.
-        Use pcb_get_polygons first to find the polygon index.
+        Changes net, layer, hatching style, or the three "remove" options
+        from the Polygon Pour dialog. Use ``pcb_get_polygons`` first to
+        find the polygon index.
+
+        NOTHING HERE REPOURS. The pour options and the hatch style decide
+        what the NEXT pour produces, so the board does not change until
+        ``pcb_repour_polygons`` runs. The reply carries ``repour_needed``
+        for that reason: a change that has been recorded and not yet
+        poured is otherwise indistinguishable from one that did nothing.
 
         Args:
             index: Polygon index (from pcb_get_polygons output)
-            net: New net name to assign (optional, empty = no change)
+            net: New net name to assign (optional, empty = no change). A
+                name that matches no net on the board is reported under
+                ``not_applied`` rather than ignored.
             layer: New layer name (optional, empty = no change)
-            hatch_style: New hatch style (optional). Options:
-                "Solid" - Solid copper fill
+            hatch_style: New hatch style (optional). Exactly four are
+                accepted, and anything else is reported rather than
+                silently dropped:
+                "Solid" - solid copper fill
+                "NoHatch" - outline only, no fill
                 "45Degree" - 45-degree crosshatch
                 "90Degree" - 90-degree crosshatch
-                "Horizontal" - Horizontal lines
-                "Vertical" - Vertical lines
+            remove_dead: Remove dead copper, the islands with no connection
+                to the polygon's net. None leaves it unchanged.
+            remove_narrow_necks: Remove necks narrower than the polygon's
+                threshold. None leaves it unchanged.
+            remove_islands_by_area: Remove islands below the polygon's area
+                threshold. None leaves it unchanged.
 
         Returns:
-            Dictionary with modified status, index, and polygon name
+            ``{"modified": bool, "success": bool, "index": N, "name": ...,
+            "changed": [field names], "not_applied": [{item, reason}],
+            "repour_needed": bool, "note": ...}``.
+
+            ``modified`` reports whether anything actually changed, not
+            whether the call ran. ``changed`` names each field that took.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"index": str(index)}
@@ -4885,8 +4909,73 @@ def register_pcb_tools(mcp):
             params["layer"] = layer
         if hatch_style:
             params["hatch_style"] = hatch_style
+        # Sent as words rather than omitted-when-false: False is a real
+        # request to clear the flag, and `if remove_dead:` would drop it.
+        if remove_dead is not None:
+            params["remove_dead"] = "true" if remove_dead else "false"
+        if remove_narrow_necks is not None:
+            params["remove_narrow_necks"] = "true" if remove_narrow_necks else "false"
+        if remove_islands_by_area is not None:
+            params["remove_islands_by_area"] = (
+                "true" if remove_islands_by_area else "false")
         result = await bridge.send_command_async("pcb.modify_polygon", params)
         return result
+
+    @mcp.tool()
+    async def pcb_place_3d_body(
+        model_path: str,
+        x: float = 0,
+        y: float = 0,
+        layer: str = "TopLayer",
+        standoff_height: float = 0,
+    ) -> dict[str, Any]:
+        """Place a STEP model directly on the open PCB, as a free 3D body.
+
+        The equivalent of Altium's **Place > 3D Body > Generic STEP
+        Model**: the model lands on the document itself, not inside a
+        component.
+
+        USE THIS RATHER THAN ``lib_link_3d_model`` WHEN THE MODEL IS NOT
+        A PART. That tool writes into a .PcbLib footprint, so putting a
+        fixture, an enclosure or a device-under-test onto a board with it
+        means inventing a library, authoring a footprint, placing it and
+        then deleting all of that again. Reach for it only when the model
+        genuinely belongs to a component in a library.
+
+        Rotation cannot be set from here. ``IPCB_ComponentBody`` exposes
+        no ``Rotation``, and the rotation that does exist lives on the
+        model behind an undocumented four-argument call, so the reply
+        reports ``rotation_applied: false`` rather than guessing. Rotate
+        in the editor if the orientation is wrong.
+
+        Args:
+            model_path: absolute path to the .step / .stp file.
+            x: body origin X in mils. This is the model's own origin, so
+                where it lands depends on how the STEP was authored;
+                check it against a known feature such as a silkscreen
+                outline rather than assuming it is centred.
+            y: body origin Y in mils.
+            layer: board layer to attach it to. Default TopLayer.
+            standoff_height: height in mils of the body's underside above
+                the board. 0 sits it on the surface.
+
+        Returns:
+            ``{"success": true, "model_path": ..., "x": N, "y": N,
+            "layer": ..., "standoff_height": N, "standoff_applied": bool,
+            "rotation_applied": false, "note": ...}``. The x and y are
+            READ BACK from the placed body, not echoed, because the
+            position is the one thing that cannot be checked without
+            opening the 3D view.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {
+            "model_path": model_path,
+            "x": str(int(round(x))),
+            "y": str(int(round(y))),
+            "layer": layer,
+            "standoff_height": str(standoff_height),
+        }
+        return await bridge.send_command_async("pcb.place_3d_body", params)
 
     @mcp.tool()
     async def pcb_get_room_rules() -> dict[str, Any]:

@@ -168,6 +168,132 @@ Begin
         + '","reason":"' + EscapeJsonString(Reason) + '"}';
 End;
 
+{ The other half of the same reply: the things that DID happen.               }
+{                                                                             }
+{ A handler that reports only its failures is read as "everything else        }
+{ worked", which is the assumption that keeps turning out to be wrong here.   }
+{ Naming what changed makes a request that was accepted and ignored visible   }
+{ as an absence rather than invisible as a success.                           }
+{                                                                             }
+{ Acc is the array BODY, without the enclosing brackets.                      }
+Procedure AddChangedField(Var Acc : String; Name : String);
+Begin
+    If Acc <> '' Then Acc := Acc + ',';
+    Acc := Acc + '"' + EscapeJsonString(Name) + '"';
+End;
+
+{..............................................................................}
+{ Focus, saved and put back                                                    }
+{                                                                              }
+{ A LIBRARY READ MOVES THE ACTIVE DOCUMENT. Every lib_ handler that takes a    }
+{ library_path focuses it with WorkspaceManager:OpenObject when it is not      }
+{ already focused, because the PCBServer and SchServer accessors only ever     }
+{ answer about the CURRENT document. For a write that is unavoidable. For a    }
+{ read it is a side effect nobody asked for, and it does not announce itself.  }
+{                                                                              }
+{ MEASURED: lib_probe_footprint was called to inspect a footprint, which       }
+{ silently focused the PcbLib, and the obj_switch_view 3d that followed        }
+{ switched the LIBRARY into 3D rather than the board. The board looked         }
+{ unchanged, the model looked absent, and the session went looking for a bug   }
+{ in the placement that was not there.                                         }
+{                                                                              }
+{ The restore is deliberately NOT applied to writes. Library authoring is a    }
+{ sequence of calls against a current component, so lib_add_pins and the       }
+{ Lib_AddFootprint* family read the focus that the call before them left.      }
+{ Putting it back after those would break the flow this bridge is built on.    }
+{..............................................................................}
+
+{ Splice a field into a finished response envelope.                           }
+{                                                                             }
+{ BuildSuccessResponse and BuildErrorResponse both emit an object carrying     }
+{ protocol_version, id, success, data and error, in that order. The shape is   }
+{ fixed and built in one place, and the last character is a                    }
+{ closing brace. That makes appending a sibling of `data` safe in a way that   }
+{ editing `data` itself would not be: data is whatever a hundred and fifty     }
+{ handlers decided to return.                                                  }
+{..............................................................................}
+{ The follow-up a reply owes its caller                                        }
+{                                                                              }
+{ SOME EDITS ARE NOT FINISHED WHEN THE CALL RETURNS, and nothing said so.      }
+{ Two shapes of it, both measured:                                             }
+{                                                                              }
+{   * A pour option is recorded and changes no copper until the polygon is     }
+{     repoured. Reported from a live board as the setting "not applying".      }
+{   * A library or board edit is real in memory and absent from disk until     }
+{     app_save_all runs. Reads as a tool that silently did nothing.            }
+{                                                                              }
+{ In both, the tool did exactly what it was asked and the caller could not     }
+{ tell that from having done nothing. A sentence in a docstring does not fix   }
+{ that: it has to be found and believed BEFORE the call, and the moment it is  }
+{ needed is after.                                                             }
+{                                                                              }
+{ So the reply carries it. A handler that knows its work needs a second step   }
+{ says which one, and the dispatcher attaches it. Handlers with no follow-up   }
+{ call nothing and pay nothing.                                                }
+{..............................................................................}
+
+Var
+    _NextStepStr : String;
+
+Procedure ResetNextStep;
+Begin
+    _NextStepStr := '';
+End;
+
+Procedure NoteNextStep(Text : String);
+Begin
+    { First writer wins. A handler that delegates would otherwise have its
+      own follow-up overwritten by the more general one underneath it, and
+      the specific advice is the useful one. }
+    If _NextStepStr = '' Then _NextStepStr := Text;
+End;
+
+Function PendingNextStep : String;
+Begin
+    Result := _NextStepStr;
+End;
+
+Function AppendEnvelopeField(Envelope : String; FieldJson : String) : String;
+Var
+    L : Integer;
+Begin
+    Result := Envelope;
+    If (FieldJson = '') Or (Envelope = '') Then Exit;
+    L := Length(Envelope);
+    If Copy(Envelope, L, 1) <> '}' Then Exit;
+    Result := Copy(Envelope, 1, L - 1) + ',' + FieldJson + '}';
+End;
+
+Function CurrentFocusedDocPath : String;
+Var
+    Workspace : IWorkspace;
+    Doc : IDocument;
+Begin
+    Result := '';
+    Try
+        Workspace := GetWorkspace;
+        If Workspace = Nil Then Exit;
+        Doc := Workspace.DM_FocusedDocument;
+        If Doc <> Nil Then Result := Doc.DM_FullPath;
+    Except End;
+End;
+
+Procedure RestoreFocusedDoc(SavedPath : String);
+Begin
+    { Nothing to go back to, or never left. Both are the common case, and }
+    { re-opening the document that is already focused would cost a        }
+    { process call on every read for no reason.                            }
+    If SavedPath = '' Then Exit;
+    If UpperCase(CurrentFocusedDocPath) = UpperCase(SavedPath) Then Exit;
+
+    Try
+        ResetParameters;
+        AddStringParameter('ObjectKind', 'Document');
+        AddStringParameter('FileName', SavedPath);
+        RunProcess('WorkspaceManager:OpenObject');
+    Except End;
+End;
+
 Function JsonInt(Name : String; Value : Integer) : String;
 Begin
     Result := '"' + EscapeJsonString(Name) + '":' + IntToStr(Value);
@@ -741,20 +867,84 @@ End;
 { runtime and took the scripting engine down with an access violation rather   }
 { than a compile error, since DelphiScript has no forward declarations.        }
 
+{..............................................................................}
+{ Object type names, spelled the way a caller actually spells them             }
+{                                                                              }
+{ MEASURED on a live board: one session asked for "Component", then "Sheet",   }
+{ then "Sheet Symbol", then "SheetSymbol", and every one came back             }
+{ INVALID_TYPE. Four attempts, four refusals, and not one of them said what    }
+{ the accepted spelling was. The vocabulary is closed, exact and case          }
+{ sensitive, and nothing published it at the point of failure.                 }
+{                                                                              }
+{ Normalising costs nothing and removes the whole class. The Altium name is    }
+{ still the canonical one; this only means a caller who writes it in the       }
+{ obvious way is understood rather than refused.                                }
+{..............................................................................}
+
+Function NormalizeTypeName(S : String) : String;
+Begin
+    Result := LowerCase(S);
+    Result := StringReplace(Result, ' ', '', -1);
+    Result := StringReplace(Result, '_', '', -1);
+    Result := StringReplace(Result, '-', '', -1);
+    { The leading 'e' is Altium's convention and the first thing a caller
+      drops. No type here is ambiguous once it is gone. }
+    If (Length(Result) > 1) And (Copy(Result, 1, 1) = 'e') Then
+        Result := Copy(Result, 2, Length(Result));
+End;
+
 Function ObjectTypeFromStringPCB(TypeStr : String) : Integer;
+Var
+    N : String;
 Begin
     Result := -1;
-    If TypeStr = 'eTrackObject'         Then Result := eTrackObject
-    Else If TypeStr = 'ePadObject'      Then Result := ePadObject
-    Else If TypeStr = 'eViaObject'      Then Result := eViaObject
-    Else If TypeStr = 'eComponentObject' Then Result := eComponentObject
-    Else If TypeStr = 'eArcObject'      Then Result := eArcObject
-    Else If TypeStr = 'eFillObject'     Then Result := eFillObject
-    Else If TypeStr = 'eTextObject'     Then Result := eTextObject
-    Else If TypeStr = 'ePolyObject'     Then Result := ePolyObject
-    Else If TypeStr = 'eRegionObject'   Then Result := eRegionObject
-    Else If TypeStr = 'eRuleObject'     Then Result := eRuleObject
-    Else If TypeStr = 'eDimensionObject' Then Result := eDimensionObject;
+    { Both the Altium spelling and the obvious one. "trackobject" and
+      "track" both arrive here as the same normalised word. }
+    N := NormalizeTypeName(TypeStr);
+    If N = 'trackobject'         Then Result := eTrackObject
+    Else If N = 'track'          Then Result := eTrackObject
+    Else If N = 'padobject'      Then Result := ePadObject
+    Else If N = 'pad'            Then Result := ePadObject
+    Else If N = 'viaobject'      Then Result := eViaObject
+    Else If N = 'via'            Then Result := eViaObject
+    Else If N = 'componentobject' Then Result := eComponentObject
+    Else If N = 'component'      Then Result := eComponentObject
+    Else If N = 'arcobject'      Then Result := eArcObject
+    Else If N = 'arc'            Then Result := eArcObject
+    Else If N = 'fillobject'     Then Result := eFillObject
+    Else If N = 'fill'           Then Result := eFillObject
+    Else If N = 'textobject'     Then Result := eTextObject
+    Else If N = 'text'           Then Result := eTextObject
+    Else If N = 'polyobject'     Then Result := ePolyObject
+    Else If N = 'poly'           Then Result := ePolyObject
+    Else If N = 'polygon'        Then Result := ePolyObject
+    Else If N = 'regionobject'   Then Result := eRegionObject
+    Else If N = 'region'         Then Result := eRegionObject
+    Else If N = 'ruleobject'     Then Result := eRuleObject
+    Else If N = 'rule'           Then Result := eRuleObject
+    Else If N = 'dimensionobject' Then Result := eDimensionObject
+    Else If N = 'dimension'      Then Result := eDimensionObject
+    { A FREE 3D BODY WAS UNREACHABLE. pcb_place_3d_body could put one on
+      a board and nothing could then find it, move it or take it off
+      again, because this vocabulary is what obj_query, obj_modify and
+      obj_delete resolve a type name through. Placement without removal
+      is a worse tool than no placement at all: a body in the wrong spot
+      had to be cleaned up in the editor by hand. }
+    Else If N = 'componentbodyobject' Then Result := eComponentBodyObject
+    Else If N = 'componentbody' Then Result := eComponentBodyObject
+    Else If N = 'body'           Then Result := eComponentBodyObject
+    Else If N = '3dbody'         Then Result := eComponentBodyObject;
+End;
+
+{ What the refusal should have said. Listed from the resolver above so the
+  two cannot drift: a message naming types the resolver does not accept is
+  worse than no message. }
+Function PCBObjectTypeNames : String;
+Begin
+    Result := 'eTrackObject, ePadObject, eViaObject, eComponentObject, '
+            + 'eArcObject, eFillObject, eTextObject, ePolyObject, '
+            + 'eRegionObject, eRuleObject, eDimensionObject, '
+            + 'eComponentBodyObject';
 End;
 
 { Inverse of ObjectTypeFromStringPCB. Written here, next to it, so the
@@ -780,6 +970,7 @@ Begin
     Else If Id = eComponentObject    Then Result := 'component'
     Else If Id = eArcObject          Then Result := 'arc'
     Else If Id = eFillObject         Then Result := 'fill'
+    Else If Id = eComponentBodyObject Then Result := 'component_body'
     Else If Id = eTextObject         Then Result := 'text'
     Else If Id = ePolyObject         Then Result := 'polygon'
     Else If Id = eRegionObject       Then Result := 'region'
@@ -1073,4 +1264,131 @@ Begin
             Result := I;
             Exit;
         End;
+End;
+
+{..............................................................................}
+{ Property-write diagnostics, for BOTH property writers                       }
+{                                                                              }
+{ SetSchProperty and SetPCBProperty append here every time a property name    }
+{ is not recognised or a write throws, so a modify can stop silently          }
+{ swallowing "set=Description=..." style mis-spellings and names this build   }
+{ does not write. The bridge is single-request, so a module-level buffer is   }
+{ safe.                                                                        }
+{                                                                              }
+{ IT LIVES IN Utils BECAUSE THE PCB SIDE COULD NOT REACH IT. This started in  }
+{ Generic.pas, which the build compiles AFTER PCBGeneric.pas, and DelphiScript}
+{ has no forward declarations, so SetPCBProperty could not have called it     }
+{ where it was. The schematic writer was fixed to report unwritten properties }
+{ and the PCB writer was not, and the gap showed up as obj_modify answering   }
+{ matched:2 for a polygon property it had never heard of.                     }
+{                                                                              }
+{ One buffer, both writers, so the next fix to one of them cannot leave the   }
+{ other behind.                                                                }
+{..............................................................................}
+
+Var
+    _PropertyDiagStr : String;
+
+{ Buffer is a String, not a TStringList. DelphiScript drops class-method  }
+{ visibility on TStringList declared at module scope (Undeclared          }
+{ identifier: Count on `_Buf.Count`), and on TStringList returned by a    }
+{ Function, even though the equivalent declared as a Function local works.}
+{ A pipe-delimited String avoids the entire trap.                          }
+{                                                                            }
+{ Each record is "kind:propname"; records are joined with '|'.            }
+
+Procedure ResetPropertyDiag;
+Begin
+    _PropertyDiagStr := '';
+End;
+
+Procedure NotePropertyDiag(Kind : String; PropName : String);
+{ Dedup so a 50-row modify with one bad prop name records it once, not 50x. }
+Var
+    Entry : String;
+Begin
+    Entry := Kind + ':' + PropName;
+    { Bracket the buffer with '|' on both sides so a Pos check finds an      }
+    { exact record (and not e.g. "unknown:Foo" matching inside "...Foobar"). }
+    If Pos('|' + Entry + '|', '|' + _PropertyDiagStr + '|') > 0 Then Exit;
+    If _PropertyDiagStr = '' Then
+        _PropertyDiagStr := Entry
+    Else
+        _PropertyDiagStr := _PropertyDiagStr + '|' + Entry;
+End;
+
+Function AnyPropertyDiag : Boolean;
+Begin
+    Result := _PropertyDiagStr <> '';
+End;
+
+Function RenderPropertyDiagJson : String;
+Var
+    UJson, FJson, Remaining, Entry, Kind, Nm : String;
+    UCount, FCount, P : Integer;
+Begin
+    UJson := '['; UCount := 0;
+    FJson := '['; FCount := 0;
+    Remaining := _PropertyDiagStr;
+    While Length(Remaining) > 0 Do
+    Begin
+        P := Pos('|', Remaining);
+        If P = 0 Then
+        Begin
+            Entry := Remaining;
+            Remaining := '';
+        End
+        Else
+        Begin
+            Entry := Copy(Remaining, 1, P - 1);
+            Remaining := Copy(Remaining, P + 1, Length(Remaining));
+        End;
+        P := Pos(':', Entry);
+        If P = 0 Then Continue;
+        Kind := Copy(Entry, 1, P - 1);
+        Nm := Copy(Entry, P + 1, Length(Entry));
+        If Kind = 'unknown' Then
+        Begin
+            If UCount > 0 Then UJson := UJson + ',';
+            UJson := UJson + '"' + EscapeJsonString(Nm) + '"';
+            Inc(UCount);
+        End
+        Else If Kind = 'failed' Then
+        Begin
+            If FCount > 0 Then FJson := FJson + ',';
+            FJson := FJson + '"' + EscapeJsonString(Nm) + '"';
+            Inc(FCount);
+        End;
+    End;
+    UJson := UJson + ']';
+    FJson := FJson + ']';
+    Result := '{"unknown_count":' + IntToStr(UCount)
+            + ',"unknown":' + UJson
+            + ',"failed_count":' + IntToStr(FCount)
+            + ',"failed":' + FJson + '}';
+End;
+
+{ The tail every modify reply carries, so what was WRITTEN is reported      }
+{ alongside what was matched.                                               }
+{                                                                           }
+{ MEASURED: obj_modify was asked to set a sheet symbol's FileName and       }
+{ answered matched:1, saved:true three times over while writing nothing.    }
+{ That property is readable and has no case in the writer, so every attempt }
+{ was recorded here as an unknown name and then discarded, because only     }
+{ batch_modify ever rendered this buffer. Nothing in the reply distinguished }
+{ it from a real one, and an operator spent a session working around a      }
+{ rename that had never happened.                                           }
+{                                                                           }
+{ matched counts what the FILTER selected. It says nothing about whether a  }
+{ property write landed, so reporting it alone made a mis-spelled or        }
+{ unsupported name indistinguishable from success.                          }
+Function ModifyOutcomeJson : String;
+Begin
+    Result := ',"properties":' + RenderPropertyDiagJson;
+    If _PropertyDiagStr <> '' Then
+        Result := Result + ',"success":false,"reason":"one or more properties '
+            + 'were not written. properties.unknown lists names this build '
+            + 'does not write, properties.failed lists writes that threw."'
+    Else
+        Result := Result + ',"success":true';
 End;
