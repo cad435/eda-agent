@@ -137,7 +137,7 @@ Begin
     If Data = '' Then
     Begin
         Board := Nil;
-        Try Board := GetPCBBoardAnywhere; Except Board := Nil; End;
+        Try Board := GetPCBBoardAnywhere(0); Except Board := Nil; End;
         If Board <> Nil Then
         Begin
             FileName := Board.FileName;
@@ -286,7 +286,7 @@ Begin
 
     { Try to get PCB preferences from the active board }
     Try
-        Board := GetPCBBoardAnywhere;
+        Board := GetPCBBoardAnywhere(0);
         If Board <> Nil Then
         Begin
             Data := Data + '"pcb":{';
@@ -580,14 +580,14 @@ Begin
         // each modified one. This bypasses WorkspaceManager:SaveAll, which
         // silently no-ops in some workspace states, and project-walk-based
         // saves, which skip free documents.
-        SaveAllDirty;
+        SaveAllDirty(0);
 
         { COUNT WHAT IS STILL DIRTY. DoFileSave does not raise when the      }
         { editor declines, so "no exception" was never evidence of a save.   }
         { MEASURED: Altium raised "A command is currently active and save    }
         { cannot be completed at this time" once per dirty document, every   }
         { one of those saves was declined, and this returned saved:true.     }
-        StillDirty := CountDirtyDocuments;
+        StillDirty := CountDirtyDocuments(0);
         If StillDirty = 0 Then
             Result := BuildSuccessResponse(RequestId,
                 '{"saved":true,"still_dirty":0}')
@@ -687,7 +687,7 @@ Var
     PcbOk, SchOk : Boolean;
     DirtyBefore, DirtyAfter, I : Integer;
 Begin
-    DirtyBefore := CountDirtyDocuments;
+    DirtyBefore := CountDirtyDocuments(0);
 
     { REPEATED, because PreProcess NESTS and one leak is not the only shape.  }
     { A single PostProcess was measured NOT to clear a real stuck state, and  }
@@ -711,7 +711,7 @@ Begin
         SchOk := True;
     Except End;
 
-    DirtyAfter := CountDirtyDocuments;
+    DirtyAfter := CountDirtyDocuments(0);
 
     Result := BuildSuccessResponse(RequestId,
         '{"pcb_post_process":' + BoolToJsonStr(PcbOk)
@@ -739,7 +739,7 @@ Begin
         'create_document':     Result := App_CreateDocument(Params, RequestId);
         'save_all':            Result := App_SaveAll(RequestId);
         'diag_workspace':      Result := App_DiagWorkspace(Params, RequestId);
-        'stop_server':         Begin SaveAllDirty; Running := False; Result := BuildSuccessResponse(RequestId, '{"stopped":true}'); End;
+        'stop_server':         Begin SaveAllDirty(0); Running := False; Result := BuildSuccessResponse(RequestId, '{"stopped":true}'); End;
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown application action: ' + Action);
     End;

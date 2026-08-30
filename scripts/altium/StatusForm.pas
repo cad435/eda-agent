@@ -99,7 +99,7 @@ Begin
 End;
 
 
-Procedure EnsureStatusBuffers;
+Procedure EnsureStatusBuffers(Dummy : Integer);
 Begin
     If PerfNames     = Nil Then PerfNames     := TStringList.Create;
     If PerfCountStrs = Nil Then PerfCountStrs := TStringList.Create;
@@ -123,12 +123,15 @@ Begin
 End;
 
 
-Function FilledDot : String;
+{ Hidden from the Run Script dialog by its argument; Dummy is never
+  read. See KnownPCBPropertyList in PCBGeneric for why. }
+Function FilledDot(Dummy : Integer) : String;
 Begin
     Result := '[x]';
 End;
 
-Function HollowDot : String;
+{ Hidden from the Run Script dialog by its argument; Dummy is never read. }
+Function HollowDot(Dummy : Integer) : String;
 Begin
     Result := '[ ]';
 End;
@@ -162,7 +165,7 @@ End;
 { procedure now just clears the visible memo. Callers that previously       }
 { wanted "apply new filter to old entries" now just see a clean slate after }
 { toggling filter chips, which is honest and side-steps the buggy API.      }
-Procedure RebuildVisibleLog;
+Procedure RebuildVisibleLog(Dummy : Integer);
 Begin
     Try
         mmo_Log.Lines.BeginUpdate;
@@ -179,7 +182,7 @@ End;
 { count/total/max stringified ints. Names are case-sensitive command IDs.    }
 Function FindOrAddPerf(Command : String) : Integer;
 Begin
-    EnsureStatusBuffers;
+    EnsureStatusBuffers(0);
     Result := PerfNames.IndexOf(Command);
     If Result >= 0 Then Exit;
     PerfNames.Add(Command);
@@ -189,7 +192,7 @@ Begin
     Result := PerfNames.Count - 1;
 End;
 
-Procedure ResetPerfStats;
+Procedure ResetPerfStats(Dummy : Integer);
 Begin
     { DelphiScript on this build refuses to resolve .Free or .Count on  }
     { module-level TStringList from inside this Procedure - even when    }
@@ -205,7 +208,7 @@ Begin
     PerfMaxStrs   := TStringList.Create;
 End;
 
-Procedure EnsurePerfHeader;
+Procedure EnsurePerfHeader(Dummy : Integer);
 Begin
     Try
         If mmo_Perf.Lines.Count < 2 Then
@@ -265,7 +268,7 @@ Begin
     { paint between the Clear and the re-add). Replacing the single       }
     { changed row in place keeps the panel rock-stable and removes the     }
     { "UI blanks out then reappears" the user reported.                    }
-    EnsurePerfHeader;
+    EnsurePerfHeader(0);
     Line := FormatPerfLine(Idx);
     RowLineIdx := 2 + Idx;   { 2 header lines come first }
     Try
@@ -280,11 +283,11 @@ End;
 { Full rebuild kept for the "Reset perf" button and the tab-switch case   }
 { where the memo might have been blanked while hidden. Hot path now uses  }
 { TrackPerf's incremental update.                                          }
-Procedure RefreshPerfPanel;
+Procedure RefreshPerfPanel(Dummy : Integer);
 Var
     I : Integer;
 Begin
-    EnsureStatusBuffers;
+    EnsureStatusBuffers(0);
     If PerfNames.Count = 0 Then Exit;
     Try
         mmo_Perf.Lines.BeginUpdate;
@@ -311,7 +314,7 @@ Procedure AppendLogLine(Command : String; DurationMs : Cardinal; IsError : Boole
 Var
     Line, IdShort : String;
 Begin
-    EnsureStatusBuffers;
+    EnsureStatusBuffers(0);
     TrackPerf(Command, DurationMs);
 
     { "Only slow" hides fast (<100 ms) non-error calls. Done here against the }
@@ -369,7 +372,7 @@ Begin
     Except End;
 End;
 
-Procedure ResetInFlight;
+Procedure ResetInFlight(Dummy : Integer);
 Begin
     Try
         InFlightActive := False;
@@ -401,7 +404,7 @@ End;
 { MCP spawned OR a standalone `python -m eda_agent.server dashboard` run    }
 { -- both refresh the same file), button is active. Otherwise grey it out  }
 { and tell the user via caption that no dashboard is reachable.            }
-Procedure UpdateOpenWebState;
+Procedure UpdateOpenWebState(Dummy : Integer);
 Var
     HeartbeatPath : String;
     HeartbeatStamp, ThresholdStamp : Integer;
@@ -516,7 +519,7 @@ Begin
     Try lbl_ValReq.Caption := IntToStr(Requests); Except End;
     Try lbl_ValMs.Caption  := MsStr; Except End;
     ColorCountdown(IdleSecToShutdown);
-    UpdateOpenWebState;
+    UpdateOpenWebState(0);
 End;
 
 
@@ -539,7 +542,7 @@ Begin
 End;
 
 
-Procedure ApplyAlwaysOnTop;
+Procedure ApplyAlwaysOnTop(Dummy : Integer);
 Begin
     Try
         If AlwaysOnTopFlag Then StatusForm.FormStyle := fsStayOnTop
@@ -552,21 +555,23 @@ Procedure SetCheckCaption(Pnl : TPanel; Checked : Boolean; LabelText : String);
 Begin
     Try
         If Checked Then
-            Pnl.Caption := '  ' + FilledDot + '  ' + LabelText
+            Pnl.Caption := '  ' + FilledDot(0) + '  ' + LabelText
         Else
-            Pnl.Caption := '  ' + HollowDot + '  ' + LabelText;
+            Pnl.Caption := '  ' + HollowDot(0) + '  ' + LabelText;
     Except End;
 End;
 
 
-Procedure ShowStatusForm;
+{ Hidden from the Run Script dialog by its argument. StartMCPServer
+  calls it at startup, so the form appears without anyone choosing it. }
+Procedure ShowStatusForm(Dummy : Integer);
 Var
     NewLeft, NewTop : Integer;
     AvailL, AvailT, AvailW, AvailH : Integer;
     Margin : Integer;
 Begin
     Try
-        EnsureStatusBuffers;
+        EnsureStatusBuffers(0);
         HidePingsFlag   := True;
         OnlySlowFlag    := False;
         AlwaysOnTopFlag := True;
@@ -581,9 +586,9 @@ Begin
         SetCheckCaption(chk_HidePings, HidePingsFlag, 'pings');
         SetCheckCaption(chk_OnlySlow,  OnlySlowFlag,  '>100ms');
         SetCheckCaption(chk_OnTop,     AlwaysOnTopFlag, 'pin');
-        ApplyAlwaysOnTop;
+        ApplyAlwaysOnTop(0);
 
-        ResetPerfStats;
+        ResetPerfStats(0);
 
         { Position bottom-right of the work area with margin.              }
         Margin := 24;
@@ -611,11 +616,11 @@ Begin
         Try lbl_Status.Caption := 'idle'; Except End;
         Try lbl_LastErr.Caption := ''; Except End;
         { Button is always enabled: dashboard can run standalone. }
-        UpdateOpenWebState;
+        UpdateOpenWebState(0);
     Except End;
 End;
 
-Procedure HideStatusForm;
+Procedure HideStatusForm(Dummy : Integer);
 Begin
     Try
         If StatusForm.Visible Then StatusForm.Hide;
@@ -727,7 +732,7 @@ Begin
     Try
         HidePingsFlag := Not HidePingsFlag;
         SetCheckCaption(chk_HidePings, HidePingsFlag, 'pings');
-        RebuildVisibleLog;
+        RebuildVisibleLog(0);
     Except End;
 End;
 
@@ -736,7 +741,7 @@ Begin
     Try
         OnlySlowFlag := Not OnlySlowFlag;
         SetCheckCaption(chk_OnlySlow, OnlySlowFlag, '>100ms');
-        RebuildVisibleLog;
+        RebuildVisibleLog(0);
     Except End;
 End;
 
@@ -745,14 +750,14 @@ Begin
     Try
         AlwaysOnTopFlag := Not AlwaysOnTopFlag;
         SetCheckCaption(chk_OnTop, AlwaysOnTopFlag, 'pin');
-        ApplyAlwaysOnTop;
+        ApplyAlwaysOnTop(0);
     Except End;
 End;
 
 Procedure edt_FilterChange(Sender : TObject);
 Begin
     Try FilterText := edt_Filter.Text; Except End;
-    RebuildVisibleLog;
+    RebuildVisibleLog(0);
 End;
 
 
@@ -862,7 +867,7 @@ End;
 Procedure tab_PerfClick(Sender : TObject);
 Begin
     Try
-        RefreshPerfPanel;
+        RefreshPerfPanel(0);
         mmo_Log.Visible := False;
         mmo_Perf.Visible := True;
         tab_Perf.Color := COLOR_BG_BASE;

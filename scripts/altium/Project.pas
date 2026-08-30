@@ -630,7 +630,7 @@ Begin
         { on-disk project structure in some code paths, and users hit this  }
         { tool precisely when the in-editor state has diverged from the     }
         { cached netlist.                                                   }
-        Try SaveAllDirty; Except End;
+        Try SaveAllDirty(0); Except End;
         LastCompileTick := 0;
         SmartCompile(Project);
     End;
@@ -1274,7 +1274,7 @@ Begin
 
         { 2) Walk the board, find the component by Name.Text, select it.    }
         Board := Nil;
-        Try Board := GetPCBBoardAnywhere; Except End;
+        Try Board := GetPCBBoardAnywhere(0); Except End;
         If Board = Nil Then
         Begin
             Result := BuildErrorResponse(RequestId, 'NO_BOARD',
@@ -1503,7 +1503,7 @@ Var
     OutlineStr, LayerStr, Data, BoardFile : String;
     First : Boolean;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then Begin Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No PCB document is active'); Exit; End;
 
     // Board outline vertices
@@ -4289,7 +4289,7 @@ Begin
     End;
 
     PrevTick := LastCompileTick;
-    Try SaveAllDirty; Except End;
+    Try SaveAllDirty(0); Except End;
     LastCompileTick := 0;
     SmartCompile(Project);
     NewTick := LastCompileTick;

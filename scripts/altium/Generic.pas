@@ -44,7 +44,7 @@ Begin
 End;
 
 { What the refusal should have said. }
-Function SchObjectTypeNames : String;
+Function SchObjectTypeNames(Dummy : Integer): String;
 Begin
     Result := 'eNetLabel, ePort, ePowerObject, eSchComponent, eWire, eBus, '
             + 'eBusEntry, eParameter, eParameterSet, ePin, eLabel, eLine, '
@@ -75,8 +75,8 @@ Begin
     Else If (N = 'polygon') Or (N = 'poly') Or (N = 'track') Or (N = 'via') Then
         Result := Result + 'That is a PCB type and this document is a '
                 + 'schematic. The pcb_ tools act on an open .PcbDoc. ';
-    Result := Result + 'Schematic types: ' + SchObjectTypeNames
-            + '. PCB types: ' + PCBObjectTypeNames
+    Result := Result + 'Schematic types: ' + SchObjectTypeNames(0)
+            + '. PCB types: ' + PCBObjectTypeNames(0)
             + '. Spelling is forgiving: case, spaces, underscores and the '
             + 'leading "e" are all optional.';
 End;
@@ -1367,7 +1367,7 @@ Begin
             '{"matched":' + IntToStr(TotalMatched) +
             ',"sheets_processed":' + IntToStr(SheetsProcessed) +
             ',"sheets_saved":' + IntToStr(SheetsSaved)
-            + ModifyOutcomeJson + '}');
+            + ModifyOutcomeJson(0) + '}');
 End;
 
 {..............................................................................}
@@ -1411,13 +1411,13 @@ Begin
           caller cannot tell that from a value that is genuinely empty. }
         Result := BuildSuccessResponse(RequestId,
             '{"objects":[' + JsonItems + '],"count":' + IntToStr(TotalMatched)
-            + ',"properties":' + RenderPropertyDiagJson + '}')
+            + ',"properties":' + RenderPropertyDiagJson(0) + '}')
     Else
     Begin
         If Saved Then SavedStr := 'true' Else SavedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr
-            + ModifyOutcomeJson + '}');
+            + ModifyOutcomeJson(0) + '}');
     End;
 End;
 
@@ -1468,13 +1468,13 @@ Begin
           caller cannot tell that from a value that is genuinely empty. }
         Result := BuildSuccessResponse(RequestId,
             '{"objects":[' + JsonItems + '],"count":' + IntToStr(TotalMatched)
-            + ',"properties":' + RenderPropertyDiagJson + '}')
+            + ',"properties":' + RenderPropertyDiagJson(0) + '}')
     Else
     Begin
         If Saved Then SavedStr := 'true' Else SavedStr := 'false';
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) + ',"saved":' + SavedStr
-            + ModifyOutcomeJson + '}');
+            + ModifyOutcomeJson(0) + '}');
     End;
 End;
 
@@ -1602,7 +1602,7 @@ Begin
 
     If PropsStr = '' Then PropsStr := 'Location.X,Location.Y';
     { Start clean, so the reply describes THIS query. }
-    ResetPropertyDiag;
+    ResetPropertyDiag(0);
 
     ParseScope(Scope, ScopeType, ScopePath);
 
@@ -1666,7 +1666,7 @@ Begin
             Result := BuildErrorResponse(RequestId, 'UNKNOWN_PROPERTY',
                 'Not a PCB property: ' + BadProps + '. These primitives do '
                 + 'not use the dotted schematic spelling, so Net.Name is '
-                + 'Net here. Available: ' + KnownPCBPropertyList + '.');
+                + 'Net here. Available: ' + KnownPCBPropertyList(0) + '.');
             Exit;
         End;
         Result := ProcessActivePCBDoc(ObjTypeInt, FilterStr, PropsStr, '', 'query', RequestId, Limit);
@@ -1701,7 +1701,7 @@ Begin
     { level and the bridge handles one request at a time, but a handler     }
     { that left entries behind would otherwise fail the next caller for a   }
     { property it never sent.                                               }
-    ResetPropertyDiag;
+    ResetPropertyDiag(0);
 
     ParseScope(Scope, ScopeType, ScopePath);
     If Not ApplyLibComponentScope(ScopeType, ScopePath) Then
@@ -2041,7 +2041,7 @@ Begin
         Exit;
     End;
 
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board <> Nil Then
     Begin
         ResetParameters;
@@ -2068,7 +2068,7 @@ Begin
     If Action = '' Then Action := 'fit';
 
     SchDoc := SchServer.GetCurrentSchDocument;
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
 
     If Action = 'fit' Then
     Begin
@@ -2180,7 +2180,7 @@ Begin
 
     { Clear the property-write diagnostics buffer so this call only       }
     { surfaces issues raised by THIS batch, not anything left over.       }
-    ResetPropertyDiag;
+    ResetPropertyDiag(0);
 
     While Length(Remaining) > 0 Do
     Begin
@@ -2284,7 +2284,7 @@ Begin
         ',"operations_skipped":' + IntToStr(OpSkipped) +
         ',"total_matched":' + IntToStr(TotalMatched) +
         ',"results":[' + ResultsJson + ']' +
-        ',"properties":' + RenderPropertyDiagJson + '}';
+        ',"properties":' + RenderPropertyDiagJson(0) + '}';
     Result := BuildSuccessResponse(RequestId, ResultJson);
 End;
 
@@ -2357,7 +2357,7 @@ Begin
         Exit;
     End;
 
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     SchDoc := SchServer.GetCurrentSchDocument;
 
     { GetPCBBoardAnywhere returns a board even when a schematic is the    }
@@ -2496,7 +2496,7 @@ Var
     Obj : ISch_GraphicalObject;
     Cleared : Integer;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     SchDoc := SchServer.GetCurrentSchDocument;
     Cleared := 0;
 
@@ -2757,7 +2757,7 @@ Begin
         Exit;
     End;
 
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     SchDoc := SchServer.GetCurrentSchDocument;
 
     If Board <> Nil Then
@@ -2797,7 +2797,7 @@ Begin
     Mode := ExtractJsonValue(Params, 'mode');
     If Mode = '' Then Mode := '3d';
 
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCB', 'No active PCB document');
@@ -2992,7 +2992,7 @@ Var
     Board : IPCB_Board;
 Begin
     SchDoc := SchServer.GetCurrentSchDocument;
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
 
     If SchDoc <> Nil Then
     Begin
@@ -5014,7 +5014,7 @@ Var
     Data : String;
     SheetStyle, UnitStr : String;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     SchDoc := SchServer.GetCurrentSchDocument;
 
     If SchDoc <> Nil Then
@@ -7845,7 +7845,7 @@ Begin
     { is undeclared on some Altium builds and Try/Except cannot catch         }
     { undeclared identifiers (see [[delphiscript_api_quirks]]), so the inline }
     { fallback would crash the script instead of just returning Nil.          }
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
 
     If Board = Nil Then
         DiagBoardNil := 1
@@ -8629,7 +8629,7 @@ Var
     LyrColor : Integer;
     LyrVisible, LyrFirst : Boolean;
 Begin
-    Board := GetPCBBoardAnywhere;
+    Board := GetPCBBoardAnywhere(0);
     If Board = Nil Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NO_PCB',

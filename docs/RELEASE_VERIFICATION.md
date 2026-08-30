@@ -1,4 +1,4 @@
-# Release verification: 2026.08.29.4
+# Release verification: 2026.08.29.9
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -139,7 +139,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.08.29.4`, `version_match` =
+Expect `altium_script_version` = `2026.08.29.9`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -183,7 +183,14 @@ and the next healthy loop consumes them.
 
 ## 1. Pure logic, no document needed
 
-**File > Run Script... > SelfTest > RunSelfTest**
+`RunSelfTest` is no longer listed in the Run Script dialog. It carries a
+dummy argument like every other internal routine, so the dialog offers
+the one thing a user does: start the bridge. To run the self test,
+temporarily drop the argument from `Procedure RunSelfTest(Dummy : Integer)`
+in `SelfTest.pas`, reload the project, and pick it from the dialog.
+
+It also ends in `ShowMessage`, so it cannot be reached over the bridge
+without splitting the summary out first.
 
 Expect `Failed: 0`. The log is written to the workspace directory.
 

@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.08.29.4';
+    SCRIPT_VERSION = '2026.08.29.9';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -115,7 +115,7 @@ Var
 { still leaves the loop with sane values.                                     }
 {..............................................................................}
 
-Procedure InitDefaultConfig;
+Procedure InitDefaultConfig(Dummy : Integer);
 Begin
     PollIntervalActiveMs := 10;
     PollIntervalIdleMs   := 30;
@@ -278,7 +278,7 @@ Begin
         Try Result := Project.DM_LogicalDocuments(Idx); Except End;
 End;
 
-Procedure InvalidateCompileCache;
+Procedure InvalidateCompileCache(Dummy : Integer);
 Begin
     LastCompileTick := 0;
     LastCompiledProject := Nil;
@@ -326,7 +326,7 @@ End;
 { GetPCBBoardAnywhere - Focus-independent PCB board lookup.                    }
 {..............................................................................}
 
-Function GetPCBBoardAnywhere : IPCB_Board;
+Function GetPCBBoardAnywhere(Dummy : Integer): IPCB_Board;
 Var
     Workspace : IWorkspace;
     Project : IProject;
@@ -417,7 +417,7 @@ Begin
     Result := Nil;
     If Path = '' Then
     Begin
-        Result := GetPCBBoardAnywhere;
+        Result := GetPCBBoardAnywhere(0);
         Exit;
     End;
     ServerDoc := Nil;
@@ -426,12 +426,12 @@ Begin
     Begin
         { Path didn't resolve to a loadable PcbDoc; fall back rather than    }
         { silently returning Nil and erroring the whole call.                }
-        Result := GetPCBBoardAnywhere;
+        Result := GetPCBBoardAnywhere(0);
         Exit;
     End;
     Try Client.ShowDocument(ServerDoc); Except End;
     Try Result := PCBServer.GetCurrentPCBBoard; Except End;
-    If Result = Nil Then Result := GetPCBBoardAnywhere;
+    If Result = Nil Then Result := GetPCBBoardAnywhere(0);
 End;
 
 {..............................................................................}
@@ -594,7 +594,7 @@ Begin
     End;
 End;
 
-Function CountDirtyDocuments : Integer;
+Function CountDirtyDocuments(Dummy : Integer): Integer;
 Var
     Workspace : IWorkspace;
     I : Integer;
@@ -687,7 +687,7 @@ Begin
     Except End;
 End;
 
-Procedure SaveAllDirty;
+Procedure SaveAllDirty(Dummy : Integer);
 Var
     Workspace : IWorkspace;
     I : Integer;
@@ -716,7 +716,7 @@ End;
 { Fallback (pointer missing): C:\EDA Agent\workspace\                        }
 {..............................................................................}
 
-Function ResolveDefaultWorkspaceDir : String;
+Function ResolveDefaultWorkspaceDir(Dummy : Integer): String;
 Var
     PointerFile : String;
     F : TextFile;
@@ -864,7 +864,7 @@ Begin
     End;
 End;
 
-Function FormatLogStamp : String;
+Function FormatLogStamp(Dummy : Integer): String;
 Begin
     Try
         Result := FormatDateTime('yyyy-mm-dd hh:nn:ss.zzz', Now);
@@ -876,7 +876,7 @@ End;
 Procedure RecordCastError(Where : String);
 Begin
     Inc(CastErrorCount);
-    AppendLog(FormatLogStamp + ',0,_cast_error,' + Where);
+    AppendLog(FormatLogStamp(0) + ',0,_cast_error,' + Where);
 End;
 
 Function IsWhitespaceOrColon(S : String; Idx : Integer) : Boolean;
@@ -1190,10 +1190,10 @@ Begin
     Result := BuildErrorResponseDetailed(RequestId, ErrorCode, ErrorMsg, '');
 End;
 
-Procedure EnsureWorkspaceDir;
+Procedure EnsureWorkspaceDir(Dummy : Integer);
 Begin
     If WorkspaceDir = '' Then
-        WorkspaceDir := ResolveDefaultWorkspaceDir;
+        WorkspaceDir := ResolveDefaultWorkspaceDir(0);
     If Not DirectoryExists(WorkspaceDir) Then
         ForceDirectories(WorkspaceDir);
 End;
@@ -1286,7 +1286,7 @@ End;
 { Wipe orphaned progress_*.json files at session start. A previous run that   }
 { crashed mid-handler would leave its progress marker behind; left untouched, }
 { Python could keep extending its deadline against a stale marker.            }
-Procedure CleanupOrphanProgress;
+Procedure CleanupOrphanProgress(Dummy : Integer);
 Var
     Files : TStringList;
     I : Integer;
@@ -1370,7 +1370,7 @@ End;
 {                                                                              }
 { The purged count is logged, so an operator can tell "the loop is slow" from }
 { "the loop is draining a backlog".                                          }
-Procedure CleanupOrphanRequests;
+Procedure CleanupOrphanRequests(Dummy : Integer);
 Var
     Files : TStringList;
     I, Purged : Integer;
@@ -1388,7 +1388,7 @@ Begin
         Files.Free;
     End;
     If Purged > 0 Then
-        AppendLog(FormatLogStamp + ',0,_purge_requests,count=' + IntToStr(Purged)
+        AppendLog(FormatLogStamp(0) + ',0,_purge_requests,count=' + IntToStr(Purged)
             + ',0,');
 End;
 
@@ -1397,7 +1397,8 @@ End;
 { leaves the response it never collected. These accumulate forever otherwise.}
 { Only safe at startup: no client can still be waiting on a response written }
 { by a session that has already ended.                                       }
-Procedure CleanupOrphanResponses;
+{ Hidden from the Run Script dialog by its argument; Dummy is never read. }
+Procedure CleanupOrphanResponses(Dummy : Integer);
 Var
     Files : TStringList;
     I, Purged : Integer;
@@ -1415,7 +1416,7 @@ Begin
         Files.Free;
     End;
     If Purged > 0 Then
-        AppendLog(FormatLogStamp + ',0,_purge_responses,count=' + IntToStr(Purged)
+        AppendLog(FormatLogStamp(0) + ',0,_purge_responses,count=' + IntToStr(Purged)
             + ',0,');
 End;
 
@@ -1426,7 +1427,7 @@ End;
 { InitDefaultConfig in place.                                                 }
 {..............................................................................}
 
-Procedure LoadMCPConfig;
+Procedure LoadMCPConfig(Dummy : Integer);
 Var
     ConfigPath, Content, V : String;
     N : Integer;

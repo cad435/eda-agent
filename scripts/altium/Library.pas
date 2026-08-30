@@ -10445,7 +10445,7 @@ Begin
       that only runs on the success path leaves the focus moved on exactly
       the calls that already went wrong. }
     SavedFocus := '';
-    If LibActionIsReadOnly(Action) Then SavedFocus := CurrentFocusedDocPath;
+    If LibActionIsReadOnly(Action) Then SavedFocus := CurrentFocusedDocPath(0);
 
     Case Action Of
         'create_symbol':        Result := Lib_CreateSymbol(Params, RequestId);

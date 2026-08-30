@@ -55,7 +55,7 @@ End;
 { migrated to the standard pattern.                                            }
 {..............................................................................}
 
-Function ProcessSingleRequest : Boolean;
+Function ProcessSingleRequest(Dummy : Integer): Boolean;
 Var
     RequestPath, RequestId : String;
     RequestContent, ResponseContent : String;
@@ -68,7 +68,7 @@ Var
     DashDetail, DashErrPayload, DashCode : String;
 Begin
     Result := False;
-    EnsureWorkspaceDir;
+    EnsureWorkspaceDir(0);
 
     If Not ScanForRequestFile(RequestPath, RequestId) Then Exit;
 
@@ -155,8 +155,8 @@ Begin
       there.
       Captured here rather than per handler because there are hundreds of
       them and this is the one place every command passes through. }
-    FocusBefore := CurrentFocusedDocPath;
-    ResetNextStep;
+    FocusBefore := CurrentFocusedDocPath(0);
+    ResetNextStep(0);
 
     ExceptionMsg := '';
     { Heartbeat: write progress_<id>.json so Python can distinguish "still      }
@@ -187,11 +187,11 @@ Begin
           handler chose to return and this must not depend on its shape.
           Silent when nothing moved, which is the overwhelming majority. }
         { The follow-up this reply owes, if the handler named one. }
-        If PendingNextStep <> '' Then
+        If PendingNextStep(0) <> '' Then
             ResponseContent := AppendEnvelopeField(ResponseContent,
-                JsonStr('next_step', PendingNextStep));
+                JsonStr('next_step', PendingNextStep(0)));
 
-        FocusAfter := CurrentFocusedDocPath;
+        FocusAfter := CurrentFocusedDocPath(0);
         If FocusAfter <> FocusBefore Then
             ResponseContent := AppendEnvelopeField(ResponseContent,
                 '"active_document_changed":' + JsonObj(
@@ -209,7 +209,7 @@ Begin
     DurationMs := GetTickCount - StartMs;
     StatusTotalAltiumMs := StatusTotalAltiumMs + DurationMs;
 
-    AppendLog(FormatLogStamp + ',' + IntToStr(DurationMs) + ',' + Command + ',' + ResultTag
+    AppendLog(FormatLogStamp(0) + ',' + IntToStr(DurationMs) + ',' + Command + ',' + ResultTag
               + ',' + IntToStr(Length(ResponseContent)) + ',' + Copy(ResponseContent, 1, 200));
 
     { Surface the error message to the dashboard (inline detail row + last- }
@@ -237,7 +237,7 @@ Begin
     End;
     AppendLogLine(Command, DurationMs, DashIsError, RequestId, DashDetail);
 
-    ResetInFlight;
+    ResetInFlight(0);
 
     Result := True;
 End;
@@ -247,10 +247,10 @@ End;
 { per-request IPC files and flushes the UI.                                    }
 {..............................................................................}
 
-Procedure CleanupMCPServer;
+Procedure CleanupMCPServer(Dummy : Integer);
 Begin
-    CleanupOrphanRequests;
-    CleanupOrphanProgress;
+    CleanupOrphanRequests(0);
+    CleanupOrphanProgress(0);
     Application.ProcessMessages;
 End;
 
@@ -280,15 +280,15 @@ Var
 Begin
     If Running Then Exit;
 
-    InitDefaultConfig;
-    EnsureWorkspaceDir;
-    LoadMCPConfig;
+    InitDefaultConfig(0);
+    EnsureWorkspaceDir(0);
+    LoadMCPConfig(0);
     { Startup purge: nothing on disk can belong to a live exchange, because no
       loop was running to serve it. Responses are purged here but NOT in
-      CleanupMCPServer -- on shutdown a client may still be reading one. }
-    CleanupOrphanRequests;
-    CleanupOrphanResponses;
-    CleanupOrphanProgress;
+      CleanupMCPServer(0) -- on shutdown a client may still be reading one. }
+    CleanupOrphanRequests(0);
+    CleanupOrphanResponses(0);
+    CleanupOrphanProgress(0);
     Running := True;
     StopPath := WorkspaceDir + 'stop';
     If FileExists(StopPath) Then DeleteFile(StopPath);
@@ -302,10 +302,10 @@ Begin
     StatusRequestCount := 0;
     StatusLastCommand := '';
     StatusTotalAltiumMs := 0;
-    ShowStatusForm;
+    ShowStatusForm(0);
     UpdateStatusHeader('MCP: idle');
     UpdateStatsLine(0, 0, 0, AutoShutdownMs Div 1000);
-    AppendLog(FormatLogStamp + ',0,_session_start,version=' + SCRIPT_VERSION
+    AppendLog(FormatLogStamp(0) + ',0,_session_start,version=' + SCRIPT_VERSION
               + ',protocol=' + IntToStr(PROTOCOL_VERSION));
 
     Try
@@ -374,7 +374,7 @@ Begin
                 Continue;
             End;
 
-            HadRequest := ProcessSingleRequest;
+            HadRequest := ProcessSingleRequest(0);
 
             If HadRequest Then
             Begin
@@ -431,22 +431,34 @@ Begin
     End;
 
     Running := False;
-    AppendLog(FormatLogStamp + ',0,_session_end,requests=' + IntToStr(StatusRequestCount));
-    HideStatusForm;
-    CleanupMCPServer;
+    AppendLog(FormatLogStamp(0) + ',0,_session_end,requests=' + IntToStr(StatusRequestCount));
+    HideStatusForm(0);
+    CleanupMCPServer(0);
 End;
 
 {..............................................................................}
-{ Stop the MCP server from outside the polling loop. Writes the 'stop' file   }
-{ so a running StartMCPServer exits on its next poll.                          }
+{ Write the 'stop' file so a running StartMCPServer exits on its next poll.   }
+{                                                                              }
+{ HIDDEN FROM THE RUN SCRIPT DIALOG, because it cannot be useful there.       }
+{ The scripting engine runs one script at a time, so while the polling loop   }
+{ holds it there is no way to pick this out of the dialog and run it, and     }
+{ when the loop is NOT running there is nothing to stop: the sentinel would   }
+{ just sit there, and StartMCPServer deletes a stale one at startup anyway.   }
+{                                                                              }
+{ Nothing calls it. Python stops the loop with the application.stop_server    }
+{ COMMAND, and the dashboard's Detach button sets Running := False directly,  }
+{ which is the same result by a shorter route. It is kept rather than deleted }
+{ because the sentinel it writes is the documented out-of-band stop and a     }
+{ future caller may want it; the argument keeps it out of a list of four      }
+{ things a human is choosing between.                                          }
 {..............................................................................}
 
-Procedure StopMCPServer;
+Procedure StopMCPServer(Dummy : Integer);
 Var
     StopPath : String;
     F : TextFile;
 Begin
-    EnsureWorkspaceDir;
+    EnsureWorkspaceDir(0);
     StopPath := WorkspaceDir + 'stop';
     Try
         AssignFile(F, StopPath);

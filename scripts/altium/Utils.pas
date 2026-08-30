@@ -285,7 +285,7 @@ End;
 Var
     _NextStepStr : String;
 
-Procedure ResetNextStep;
+Procedure ResetNextStep(Dummy : Integer);
 Begin
     _NextStepStr := '';
 End;
@@ -298,7 +298,7 @@ Begin
     If _NextStepStr = '' Then _NextStepStr := Text;
 End;
 
-Function PendingNextStep : String;
+Function PendingNextStep(Dummy : Integer): String;
 Begin
     Result := _NextStepStr;
 End;
@@ -314,7 +314,7 @@ Begin
     Result := Copy(Envelope, 1, L - 1) + ',' + FieldJson + '}';
 End;
 
-Function CurrentFocusedDocPath : String;
+Function CurrentFocusedDocPath(Dummy : Integer): String;
 Var
     Workspace : IWorkspace;
     Doc : IDocument;
@@ -334,7 +334,7 @@ Begin
     { re-opening the document that is already focused would cost a        }
     { process call on every read for no reason.                            }
     If SavedPath = '' Then Exit;
-    If UpperCase(CurrentFocusedDocPath) = UpperCase(SavedPath) Then Exit;
+    If UpperCase(CurrentFocusedDocPath(0)) = UpperCase(SavedPath) Then Exit;
 
     Try
         ResetParameters;
@@ -503,6 +503,71 @@ End;
 { StrToInt so a non-numeric value never raises EConvertError - the exception   }
 { was caught anyway, but Altium's IDE break-on-exception pops a modal that     }
 { blocks the polling loop.                                                     }
+{ Whether StrToFloat can be handed this without raising.                      }
+{                                                                             }
+{ THE Try/Except AROUND StrToFloat IS NOT A GUARD. Altium's script IDE
+  breaks on the exception BEFORE the handler runs, so a bad value stops
+  the script on the StrToFloat line with an EConvertError dialog and takes
+  the polling loop with it. Measured: a self-test passing 'abc' halted
+  there, and the Except three lines below never ran.
+
+  IsIntStr exists for exactly this reason on the integer side and says so.
+  The float side was left on Try/Except alone, so any tool handed a
+  non-numeric where it wanted a float had the same halt waiting for it:
+  an arc angle, a standoff height, a model offset.
+
+  Accepts a leading sign, digits, at most one '.', and an optional
+  exponent. Deliberately does NOT accept ',' as a decimal separator:
+  the caller forces '.' before parsing, so a comma is a bad value here
+  whatever the machine's regional settings say. }
+Function IsFloatStr(S : String) : Boolean;
+Var
+    I, StartPos : Integer;
+    Dots, Digits, Exponents : Integer;
+    Ch : String;
+Begin
+    S := Trim(S);
+    Result := False;
+    If S = '' Then Exit;
+    StartPos := 1;
+    If (S[1] = '-') Or (S[1] = '+') Then StartPos := 2;
+    If StartPos > Length(S) Then Exit;
+
+    Dots := 0;
+    Digits := 0;
+    Exponents := 0;
+    For I := StartPos To Length(S) Do
+    Begin
+        Ch := Copy(S, I, 1);
+        If (Ch >= '0') And (Ch <= '9') Then
+            Digits := Digits + 1
+        Else If Ch = '.' Then
+        Begin
+            Dots := Dots + 1;
+            If Dots > 1 Then Exit;
+            If Exponents > 0 Then Exit;   { 1e5.5 is not a number }
+        End
+        Else If (Ch = 'e') Or (Ch = 'E') Then
+        Begin
+            Exponents := Exponents + 1;
+            If Exponents > 1 Then Exit;
+            If Digits = 0 Then Exit;      { 'e5' has no mantissa }
+            { A sign may follow the exponent, and a digit must. }
+            If I = Length(S) Then Exit;
+            Ch := Copy(S, I + 1, 1);
+            If (Ch = '-') Or (Ch = '+') Then
+            Begin
+                If I + 1 = Length(S) Then Exit;
+                Ch := Copy(S, I + 2, 1);
+            End;
+            If (Ch < '0') Or (Ch > '9') Then Exit;
+        End
+        Else
+            Exit;                          { anything else is not a number }
+    End;
+    Result := Digits > 0;
+End;
+
 Function IsIntStr(S : String) : Boolean;
 Var
     I, StartPos : Integer;
@@ -549,7 +614,7 @@ Begin
         If S[I] <> C Then Result := Result + S[I];
 End;
 
-Function IeeeSymbolNames : String;
+Function IeeeSymbolNames(Dummy : Integer): String;
 Begin
     Result :=
         'no_symbol|dot|right_left_signal_flow|clock|active_low_input|' +
@@ -570,7 +635,7 @@ Begin
     { JSON output, where a bad read must not abort the whole response.       }
     Result := 'no_symbol';
     If V <= 0 Then Exit;
-    Names := IeeeSymbolNames + '|';
+    Names := IeeeSymbolNames(0) + '|';
     I := 0;
     While Names <> '' Do
     Begin
@@ -622,7 +687,7 @@ Begin
 
     { Altium's raw enum spelling ('eActiveLowInput') differs from the         }
     { canonical name only by a leading 'e', so retry once with it stripped.   }
-    Names := IeeeSymbolNames + '|';
+    Names := IeeeSymbolNames(0) + '|';
     I := 0;
     While Names <> '' Do
     Begin
@@ -660,6 +725,17 @@ Begin
         Result := Default;
         Exit;
     End;
+    { PRE-CHECKED, not merely guarded. The Try/Except below cannot save
+      the session: the script IDE breaks on the exception before the
+      handler runs, so a value like 'abc' halts on the StrToFloat line
+      behind an EConvertError dialog and the polling loop stops with it.
+      StrToIntDef has carried this pre-check for the same reason. }
+    If Not IsFloatStr(S) Then
+    Begin
+        Result := Default;
+        Exit;
+    End;
+
     OldSep := DecimalSeparator;
     DecimalSeparator := '.';
     Try
@@ -989,7 +1065,7 @@ End;
 { What the refusal should have said. Listed from the resolver above so the
   two cannot drift: a message naming types the resolver does not accept is
   worse than no message. }
-Function PCBObjectTypeNames : String;
+Function PCBObjectTypeNames(Dummy : Integer): String;
 Begin
     Result := 'eTrackObject, ePadObject, eViaObject, eComponentObject, '
             + 'eArcObject, eFillObject, eTextObject, ePolyObject, '
@@ -1147,7 +1223,7 @@ End;
 { hex literal has silently aborted a unit in this dialect before.              }
 {..............................................................................}
 
-Function MechLayerIdBase : Integer;
+Function MechLayerIdBase(Dummy : Integer): Integer;
 Begin
     Result := 16908288;
 End;
@@ -1177,8 +1253,8 @@ Begin
     { A raw layer id, as stored in the file. }
     If Value > 1024 Then
     Begin
-        If (Value > MechLayerIdBase) And (Value <= MechLayerIdBase + 1024) Then
-            Result := Value - MechLayerIdBase;
+        If (Value > MechLayerIdBase(0)) And (Value <= MechLayerIdBase(0) + 1024) Then
+            Result := Value - MechLayerIdBase(0);
         Exit;
     End;
 
@@ -1531,7 +1607,7 @@ Var
 {                                                                            }
 { Each record is "kind:propname"; records are joined with '|'.            }
 
-Procedure ResetPropertyDiag;
+Procedure ResetPropertyDiag(Dummy : Integer);
 Begin
     _PropertyDiagStr := '';
 End;
@@ -1551,12 +1627,7 @@ Begin
         _PropertyDiagStr := _PropertyDiagStr + '|' + Entry;
 End;
 
-Function AnyPropertyDiag : Boolean;
-Begin
-    Result := _PropertyDiagStr <> '';
-End;
-
-Function RenderPropertyDiagJson : String;
+Function RenderPropertyDiagJson(Dummy : Integer): String;
 Var
     UJson, FJson, Remaining, Entry, Kind, Nm : String;
     UCount, FCount, P : Integer;
@@ -1616,9 +1687,9 @@ End;
 { matched counts what the FILTER selected. It says nothing about whether a  }
 { property write landed, so reporting it alone made a mis-spelled or        }
 { unsupported name indistinguishable from success.                          }
-Function ModifyOutcomeJson : String;
+Function ModifyOutcomeJson(Dummy : Integer): String;
 Begin
-    Result := ',"properties":' + RenderPropertyDiagJson;
+    Result := ',"properties":' + RenderPropertyDiagJson(0);
     If _PropertyDiagStr <> '' Then
         Result := Result + ',"success":false,"reason":"one or more properties '
             + 'were not written. properties.unknown lists names this build '

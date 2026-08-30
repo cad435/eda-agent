@@ -22,6 +22,8 @@ Var
     Comp  : IPCB_Component;
     Txt   : IPCB_Text;
     Rgn   : IPCB_Region;
+    Poly  : IPCB_Polygon;
+    Body  : IPCB_ComponentBody;
     Oid   : Integer;
 Begin
     Result := '';
@@ -142,6 +144,37 @@ Begin
         Begin
             If Oid = eTextObject Then Begin Txt := Obj; Result := Txt.Text; End;
         End
+        { WRITABLE AND UNREADABLE IS THE SAME BUG IN THE OTHER DIRECTION.
+          These three were added to the writer and not to this reader, so
+          a caller could set a pour option and had no way to confirm it,
+          which is the exact failure the writer was fixed for. Found by
+          asking for them on a live board and being told they are not PCB
+          properties. }
+        Else If PropName = 'RemoveDead' Then
+        Begin
+            If Oid = ePolyObject Then
+            Begin Poly := Obj; Result := BoolToJsonStr(Poly.RemoveDead); End;
+        End
+        Else If PropName = 'RemoveNarrowNecks' Then
+        Begin
+            If Oid = ePolyObject Then
+            Begin Poly := Obj; Result := BoolToJsonStr(Poly.RemoveNarrowNecks); End;
+        End
+        Else If PropName = 'RemoveIslandsByArea' Then
+        Begin
+            If Oid = ePolyObject Then
+            Begin Poly := Obj; Result := BoolToJsonStr(Poly.RemoveIslandsByArea); End;
+        End
+        Else If PropName = 'StandoffHeight' Then
+        Begin
+            If Oid = eComponentBodyObject Then
+            Begin Body := Obj; Result := IntToStr(CoordToMils(Body.StandoffHeight)); End;
+        End
+        Else If PropName = 'OverallHeight' Then
+        Begin
+            If Oid = eComponentBodyObject Then
+            Begin Body := Obj; Result := IntToStr(CoordToMils(Body.OverallHeight)); End;
+        End
         { A REGION'S KIND IS WHAT MAKES IT A BOARD CUTOUT, and nothing
           here could see it. Reported from a live board as the flag not
           being reachable through this API; it is
@@ -189,7 +222,7 @@ Var
     Lyr : TLayer;
 Begin
     Result := False;
-    Lyr := ResolveLayerId(GetPCBBoardAnywhere, Value);
+    Lyr := ResolveLayerId(GetPCBBoardAnywhere(0), Value);
     If Lyr <> eNoLayer Then
     Begin
         Obj.Layer := Lyr;
@@ -461,12 +494,27 @@ Begin
     End;
 End;
 
-Function KnownPCBPropertyList : String;
+{ HIDDEN FROM THE RUN SCRIPT DIALOG BY ITS ARGUMENT.
+  Altium lists only parameterless routines there, so this project puts
+  fifty-five internal helpers in front of a user whose four real entry
+  points are StartMCPServer, StopMCPServer, RunSelfTest and
+  ShowStatusForm. A parameter is the only lever DelphiScript offers:
+  there are no visibility modifiers and every unit in the project is
+  scanned.
+
+  Dummy is never read. It exists to change the arity and nothing else.
+  Reported by a user as too many functions listed to find the right one. }
+Function KnownPCBPropertyList(Dummy : Integer) : String;
 Begin
     Result := 'ObjectId, X, Y, Layer, Descriptor, Selected, Net, X1, Y1, '
         + 'X2, Y2, Width, Radius, StartAngle, EndAngle, XCenter, YCenter, '
         + 'HoleSize, Size, TopShape, TopXSize, TopYSize, Rotation, Name, '
-        + 'Text, Pattern, Designator, Comment, SourceDesignator';
+        + 'Text, Pattern, Designator, Comment, SourceDesignator, '
+        { Everything the reader above answers. A list that lags the reader
+          tells a caller a property does not exist when it does, which is
+          how the pour flags were reported as unreachable. }
+        + 'Kind, RemoveDead, RemoveNarrowNecks, RemoveIslandsByArea, '
+        + 'StandoffHeight, OverallHeight';
 End;
 
 Function BuildObjectJsonPCB(Obj : IPCB_Primitive; PropsStr : String) : String;
@@ -682,7 +730,7 @@ Begin
         End;
     End
     Else
-        Board := GetPCBBoardAnywhere;
+        Board := GetPCBBoardAnywhere(0);
 
     If Board = Nil Then
     Begin
@@ -719,5 +767,5 @@ Begin
           way the schematic modify replies do. }
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched)
-            + ModifyOutcomeJson + '}');
+            + ModifyOutcomeJson(0) + '}');
 End;
