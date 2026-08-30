@@ -278,6 +278,30 @@ Bulk tools like `obj_batch_modify`, `pcb_move_components`, and `sch_place_compon
 
 > Bridge changes are checked by Free Pascal and a linter before they ship, which cannot prove Altium's own DelphiScript engine accepts them: the two differ on which identifiers exist, and an undeclared one faults at runtime rather than at compile time. [`docs/RELEASE_VERIFICATION.md`](docs/RELEASE_VERIFICATION.md) is the procedure for closing that gap on a release, starting with a self-test that runs inside Altium and needs no document.
 
+### UI automation synthesises real keyboard and mouse input
+
+Most of this project talks to Altium through the scripting bridge, which addresses a window handle directly and cannot affect anything else. The `app_*` UI automation tools are different, and are used where Altium offers no other route: `application.execute_menu` reports success while invoking nothing, `GetMenu` returns 0 on Altium's DevExpress bars, and whole dialogs (Update From Libraries, Preferences, the wizards) have no scripting API at all.
+
+**Synthesised input is not addressed to a window.** `keybd_event` and `mouse_event` are delivered to whatever is active at the instant they fire, and a click lands on whatever is under the pointer. So these tools:
+
+- **take focus.** Menus and clicks need Altium in front, so running them while you are typing will interrupt you
+- **cannot be confirmed the way a property write can.** A keystroke has no read-back; anything that matters is verified afterwards with a bridge read
+- could, without containment, deliver an event to another application if focus or the pointer moved
+
+What contains that: a foreground check runs **immediately before every event**, including between a key press and its release, and refocuses Altium rather than failing; coordinates are refused unless the point is over a window belonging to Altium's own process; and no tool accepts a window handle from the caller, so an arbitrary window cannot be addressed. `tests/test_foreground_guard.py` enforces all three, checking the event guard per line of source rather than per function, because a function that checks once and then emits five events in a loop would pass a naive test while firing four unchecked events.
+
+**To switch it off entirely:**
+
+```
+EDA_AGENT_UI_AUTOMATION=0
+```
+
+Every synthesised event is then refused. Reading stays available on purpose, because dialog detection is how the rest of the system notices Altium is blocked on a modal.
+
+One case is not solvable: Altium's menu bar carries entries that are commands rather than menus (Place a Comment, Share, Open Home page, Preferences), and nothing distinguishes them. Measured across all 17 bar items: identical MSAA state including `HASPOPUP`, identical `accDefaultAction`, identical UIA control type. Listing such an entry clicks it, and clicking it runs it.
+
+Full detail in [`docs/ui-automation.md`](docs/ui-automation.md).
+
 ### Altium DelphiScript engine can crash
 
 Some tool paths trigger DelphiScript compile or runtime errors ("Undeclared identifier…", "Could not convert variant of type (Dispatch) into type (OleStr)", etc.). When that happens, the script project halts mid-execution and the polling loop stops responding. You will see one of:
@@ -428,6 +452,13 @@ Workspace (used for IPC files between Python and Altium):
 - Default: `%USERPROFILE%\EDA Agent\workspace\`
 - Override: set `EDA_AGENT_WORKSPACE` environment variable
 - The DelphiScript side reads the resolved path from `C:\ProgramData\eda-agent\workspace-path.txt`, which Python writes at startup and on every `install-scripts` run
+
+UI automation (synthesised keyboard and mouse input, used for the parts of Altium with no scripting API):
+
+- Default: **on**
+- Disable: set `EDA_AGENT_UI_AUTOMATION=0` (also `false`, `no`, `off`). Anything else leaves it on, so a typo cannot silently disable it
+- Read at call time, so it takes effect on the next event rather than the next restart
+- See [UI automation synthesises real keyboard and mouse input](#ui-automation-synthesises-real-keyboard-and-mouse-input) for what it is for and what it can do
 
 Coordinates throughout the API are in **mils** (1 mil = 0.0254 mm).
 

@@ -31,6 +31,12 @@ dependencies = [
     "pydantic>=2.0,<3",
     "psutil>=5.9.0,<8",
     "pywin32>=306; sys_platform == 'win32'",
+    # MSAA and UI Automation, the two accessible layers the UI driving
+    # rests on: ui/controls.py reads oleacc through it and ui/uia.py
+    # reads UIAutomationCore. Both guard the import, so an absent
+    # comtypes turned every dialog read into "unavailable" rather than a
+    # failure, which is the quietest way for a capability to go missing.
+    "comtypes>=1.2,<2; sys_platform == 'win32'",
     "networkx>=3.0,<4",
     "numpy>=1.24,<3",
     # Pure-Python OLE/CFB reader for the headless Altium file parsers
