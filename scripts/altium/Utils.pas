@@ -82,17 +82,35 @@ End;
 
 Function FloatToJsonStr(Value : Double) : String;
 Var
-    OldSep : Char;
+    Sep, Ch, Swapped : String;
+    I : Integer;
 Begin
-    { Locale-agnostic float -> string. Delphi FloatToStr respects the global }
-    { DecimalSeparator, so on a system with comma-as-decimal it produces     }
-    { '90,0' which is invalid JSON. Force '.' for the duration of the call. }
-    OldSep := DecimalSeparator;
-    DecimalSeparator := '.';
-    Try
-        Result := FloatToStr(Value);
-    Finally
-        DecimalSeparator := OldSep;
+    { Locale-agnostic float -> string. Delphi FloatToStr respects the global
+      DecimalSeparator, so on a comma-decimal system it produces '90,0',
+      which is not valid JSON.
+
+      NO GLOBAL IS MUTATED. This used to set DecimalSeparator to '.' for the
+      duration of the call and restore it after. That works, but it leaves a
+      window in which a global the whole application shares has been changed
+      underneath it, and the window gets wider every time another call site
+      starts using this wrapper. Converting first and swapping the separator
+      character afterwards has no window at all.
+
+      Swapping is complete because FloatToStr emits only digits, a sign, an
+      exponent 'E' and the single decimal separator. It never emits a
+      thousands separator, which is FloatToStrF with ffNumber. }
+    Result := FloatToStr(Value);
+    Sep := DecimalSeparator;
+    If Sep <> '.' Then
+    Begin
+        Swapped := '';
+        For I := 1 To Length(Result) Do
+        Begin
+            Ch := Copy(Result, I, 1);
+            If Ch = Sep Then Ch := '.';
+            Swapped := Swapped + Ch;
+        End;
+        Result := Swapped;
     End;
 End;
 
@@ -712,7 +730,8 @@ End;
 
 Function StrToFloatDef(S : String; Default : Double) : Double;
 Var
-    OldSep : Char;
+    Sep, Ch, Work : String;
+    I : Integer;
 Begin
     { Locale-agnostic float parsing. JSON always uses '.' as the decimal      }
     { separator regardless of the user's Windows regional settings, but Delphi}
@@ -736,16 +755,32 @@ Begin
         Exit;
     End;
 
-    OldSep := DecimalSeparator;
-    DecimalSeparator := '.';
-    Try
-        Try
-            Result := StrToFloat(S);
-        Except
-            Result := Default;
+    { IsFloatStr above guarantees S is in dot form, so the conversion is
+      done by putting it into the form THIS locale parses rather than by
+      forcing the locale to match the string. Same reasoning as the emit
+      side: no global is touched, so there is no window.
+
+      The Try/Except is kept as a backstop and should now be unreachable:
+      a pre-validated, locale-formed string does not raise EConvertError.
+      It is deliberately not relied on, because the script engine surfaces
+      an RTL conversion error as a modal before the handler runs. }
+    Sep := DecimalSeparator;
+    Work := S;
+    If Sep <> '.' Then
+    Begin
+        Work := '';
+        For I := 1 To Length(S) Do
+        Begin
+            Ch := Copy(S, I, 1);
+            If Ch = '.' Then Ch := Sep;
+            Work := Work + Ch;
         End;
-    Finally
-        DecimalSeparator := OldSep;
+    End;
+
+    Try
+        Result := StrToFloat(Work);
+    Except
+        Result := Default;
     End;
 End;
 

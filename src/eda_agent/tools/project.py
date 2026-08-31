@@ -4,6 +4,7 @@
 
 from typing import Any, Optional
 from ..bridge import get_bridge
+from .option_hints import project_option_collision
 from .datasheet_hints import tag_response
 from .bulk_hints import BulkHintTracker
 
@@ -203,6 +204,14 @@ def register_project_tools(mcp):
             params["project_path"] = project_path
 
         result = await bridge.send_command_async("project.set_parameter", params)
+        # A PROJECT PARAMETER IS NOT A PROJECT OPTION, and the names
+        # collide. Asking for hierarchy_mode here creates a user
+        # parameter of that name and verifies it, correctly, while the
+        # actual setting is untouched. Nothing said so, and the reply
+        # looked like a success because it was one, of a different thing.
+        hint = project_option_collision(name)
+        if hint and isinstance(result, dict):
+            result["_hint_not_a_project_option"] = hint
         return result
 
     @mcp.tool()

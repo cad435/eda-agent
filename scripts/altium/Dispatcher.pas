@@ -55,6 +55,56 @@ End;
 { migrated to the standard pattern.                                            }
 {..............................................................................}
 
+{..............................................................................}
+{ CommandIsReadOnly - whether a command leaves the design untouched.           }
+{                                                                              }
+{ Used for ONE thing: deciding whether the compiled-netlist cache survives a   }
+{ command. SmartCompile skips DM_Compile for COMPILE_CACHE_TTL_MS when the     }
+{ project reports no dirty documents, and InvalidateCompileCache existed but   }
+{ was never called from anywhere, so a write followed within that window by a  }
+{ connectivity read handed back the netlist from BEFORE the write. Whether it  }
+{ did depended on whether that particular handler happened to dirty the        }
+{ document, which is not uniform: many go through ProcessControl, which marks  }
+{ the document modified, and others assign through SetState_ and do not.       }
+{                                                                              }
+{ THE UNKNOWN CASE COUNTS AS A WRITE. Only the prefixes below are treated as   }
+{ leaving the design alone, so a command this list has never heard of, and     }
+{ every command added later, invalidates. An unnecessary invalidation costs    }
+{ one recompile; a missed one returns connectivity that predates the edit.     }
+{..............................................................................}
+
+Function ActionHasPrefix(Action : String; Prefix : String) : Boolean;
+Begin
+    Result := Copy(Action, 1, Length(Prefix)) = Prefix;
+End;
+
+Function CommandIsReadOnly(Command : String) : Boolean;
+Var
+    Action : String;
+    DotPos : Integer;
+Begin
+    Action := LowerCase(Trim(Command));
+    DotPos := Pos('.', Action);
+    If DotPos > 0 Then Action := Copy(Action, DotPos + 1, Length(Action) - DotPos);
+
+    Result := ActionHasPrefix(Action, 'get_')
+           Or ActionHasPrefix(Action, 'list_')
+           Or ActionHasPrefix(Action, 'query')
+           Or ActionHasPrefix(Action, 'read_')
+           Or ActionHasPrefix(Action, 'find_')
+           Or ActionHasPrefix(Action, 'count')
+           Or ActionHasPrefix(Action, 'audit_')
+           Or ActionHasPrefix(Action, 'check_')
+           Or ActionHasPrefix(Action, 'calc_')
+           Or ActionHasPrefix(Action, 'export_')
+           Or ActionHasPrefix(Action, 'render_')
+           Or ActionHasPrefix(Action, 'probe_')
+           Or ActionHasPrefix(Action, 'inspect_')
+           Or ActionHasPrefix(Action, 'diff_')
+           Or ActionHasPrefix(Action, 'compare_')
+           Or (Action = 'ping');
+End;
+
 Function ProcessSingleRequest(Dummy : Integer): Boolean;
 Var
     RequestPath, RequestId : String;
@@ -172,6 +222,15 @@ Begin
             ResponseContent := BuildErrorResponse(RequestId, 'INTERNAL_ERROR', ExceptionMsg);
             ResultTag := 'EXCEPTION';
         End;
+
+        { The compiled netlist is stale the moment anything is written, and
+          this is the one place every command passes through, so it is done
+          here rather than in each of the hundreds of handlers.
+
+          On the exception path too, deliberately: a handler that threw part
+          way through may well have written something first, and that is
+          exactly when a cached netlist is worth least. }
+        If Not CommandIsReadOnly(Command) Then InvalidateCompileCache(0);
 
         If ResponseContent = '' Then
         Begin

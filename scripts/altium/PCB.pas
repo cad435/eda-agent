@@ -990,7 +990,7 @@ Begin
             GapReport := ',"gap_requested_mm":' + GapMMStr
         Else GapReport := ',"gap_requested_mils":' + GapStr;
         GapReport := GapReport
-            + ',"gap_after_mm":' + FloatToStr(CoordToMM(GapAfter))
+            + ',"gap_after_mm":' + FloatToJsonStr(CoordToMM(GapAfter))
             + ',"gap_written":' + BoolToJsonStr(GapVerified);
         If GapBefore >= 0 Then
             GapReport := GapReport + ',"gap_before_mils":'
@@ -2584,7 +2584,7 @@ Begin
         JsonObj(
             JsonInt('copied', Copied) + ',' +
             JsonInt('count', Count) + ',' +
-            JsonStr('angle_step', FloatToStr(StepDeg))
+            JsonStr('angle_step', FloatToJsonStr(StepDeg))
         ));
 End;
 
@@ -2769,7 +2769,7 @@ Begin
         JsonObj(
             JsonInt('scaled', Scaled) + ',' +
             JsonInt('skipped', Skipped) + ',' +
-            JsonStr('ratio', FloatToStr(R)) + ',' +
+            JsonStr('ratio', FloatToJsonStr(R)) + ',' +
             JsonInt('anchor_x', CoordToMils(X)) + ',' +
             JsonInt('anchor_y', CoordToMils(Y))
         ));
@@ -3469,12 +3469,12 @@ Begin
             If FoundIdx >= 0 Then
             Begin
                 Accum := StrToFloatDef(NetLengthStrs[FoundIdx], 0) + SegLen;
-                NetLengthStrs[FoundIdx] := FloatToStr(Accum);
+                NetLengthStrs[FoundIdx] := FloatToJsonStr(Accum);
             End
             Else
             Begin
                 NetNames.Add(NetName);
-                NetLengthStrs.Add(FloatToStr(SegLen));
+                NetLengthStrs.Add(FloatToJsonStr(SegLen));
             End;
 
             Obj := Iterator.NextPCBObject;

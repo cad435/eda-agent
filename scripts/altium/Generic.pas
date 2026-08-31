@@ -12,6 +12,39 @@
 { Object Type Mapping                                                         }
 {..............................................................................}
 
+{..............................................................................}
+{ Where a pin actually connects.                                                }
+{                                                                              }
+{ ISch_Pin.Location IS THE BODY-SIDE ROOT, not the point a wire attaches to.   }
+{ The electrical end is PinLength away along Orientation:                      }
+{   0 = right (+x)   1 = up (+y)   2 = left (-x)   3 = down (-y)               }
+{                                                                              }
+{ MEASURED on a live sheet, with wires as the ground truth because a wire      }
+{ endpoint is where the connection physically is. Four pins at Location.X      }
+{ 3700, Orientation 2, PinLength 300: every attached wire vertex sat at        }
+{ x 3400, and not one touched 3700. A right-facing pin read Location.X 4900    }
+{ and connected at 5200, so the sign follows orientation.                      }
+{                                                                              }
+{ Shared by the obj_query property getter and by the pin dump, so the two      }
+{ cannot drift into disagreeing about the same pin. Callers kept deriving      }
+{ this by hand and getting the direction wrong, which is silent: the geometry  }
+{ looks plausible and simply does not connect.                                 }
+{..............................................................................}
+
+Function PinEndX(RootX : Integer; Orient : Integer; PinLen : Integer) : Integer;
+Begin
+    Result := RootX;
+    If Orient = 0 Then Result := RootX + PinLen
+    Else If Orient = 2 Then Result := RootX - PinLen;
+End;
+
+Function PinEndY(RootY : Integer; Orient : Integer; PinLen : Integer) : Integer;
+Begin
+    Result := RootY;
+    If Orient = 1 Then Result := RootY + PinLen
+    Else If Orient = 3 Then Result := RootY - PinLen;
+End;
+
 Function ObjectTypeFromString(TypeStr : String) : Integer;
 Var
     N : String;
@@ -472,8 +505,7 @@ Begin
             Try POrient := Obj.Orientation; Except End;
             Try PLen := Obj.PinLength; Except End;
             Try PCoord := Obj.Location.X; Except End;
-            If POrient = 0 Then PCoord := PCoord + PLen
-            Else If POrient = 2 Then PCoord := PCoord - PLen;
+            PCoord := PinEndX(PCoord, POrient, PLen);
             Result := IntToStr(CoordToMils(PCoord));
         End
         Else If PropName = 'ConnectionY' Then
@@ -482,8 +514,7 @@ Begin
             Try POrient := Obj.Orientation; Except End;
             Try PLen := Obj.PinLength; Except End;
             Try PCoord := Obj.Location.Y; Except End;
-            If POrient = 1 Then PCoord := PCoord + PLen
-            Else If POrient = 3 Then PCoord := PCoord - PLen;
+            PCoord := PinEndY(PCoord, POrient, PLen);
             Result := IntToStr(CoordToMils(PCoord));
         End
         Else If PropName = 'XSize'       Then Result := IntToStr(CoordToMils(Obj.XSize))
@@ -4308,6 +4339,160 @@ End;
 { already (Altium has applied component placement + orientation).           }
 {..............................................................................}
 
+{..............................................................................}
+{ Resolving a designator when several symbols carry it.                        }
+{                                                                              }
+{ A multi-part device places one ISch_Component per sub-part and every one of  }
+{ them carries the SAME designator, so "the component called U13" has no       }
+{ single answer. The handlers below used to iterate, take the first match,     }
+{ stop, and report success naming only the designator, so a caller could not   }
+{ tell which symbol had been written, or that there had been a choice at all.  }
+{                                                                              }
+{ MEASURED on a live sheet: three symbols designated U13 for a PartCount of 2, }
+{ two of them sitting on part 1.                                               }
+{                                                                              }
+{ LOCATION IS THE DISCRIMINATOR. CurrentPartID does not separate them, because }
+{ two symbols can rest on the same part, and UniqueId does not either, because }
+{ sub-parts of one physical device are supposed to share it.                   }
+{..............................................................................}
+
+Function SchComponentCount(SchDoc : ISch_Document; Designator : String) : Integer;
+Var
+    Iterator : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+Begin
+    Result := 0;
+    If SchDoc = Nil Then Exit;
+    Iterator := SchDoc.SchIterator_Create;
+    Try
+        Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iterator.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            Comp := Obj;
+            If Comp.Designator.Text = Designator Then Result := Result + 1;
+            Obj := Iterator.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iterator);
+    End;
+End;
+
+{ One symbol by designator, narrowed by location when one is given. An empty   }
+{ location returns the first match, which is the old behaviour and is correct  }
+{ once the caller has established there is only one.                           }
+Function SchComponentAt(SchDoc : ISch_Document; Designator : String;
+                        LocX : String; LocY : String) : ISch_Component;
+Var
+    Iterator : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    CompLoc : TLocation;
+    WantX, WantY : Integer;
+    Narrow, Hit : Boolean;
+Begin
+    Result := Nil;
+    If SchDoc = Nil Then Exit;
+
+    Narrow := (LocX <> '') And (LocY <> '') And IsIntStr(LocX) And IsIntStr(LocY);
+    WantX := 0;
+    WantY := 0;
+    If Narrow Then
+    Begin
+        WantX := StrToIntDef(LocX, 0);
+        WantY := StrToIntDef(LocY, 0);
+    End;
+
+    Iterator := SchDoc.SchIterator_Create;
+    Try
+        Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iterator.FirstSchObject;
+        While (Obj <> Nil) And (Result = Nil) Do
+        Begin
+            Comp := Obj;
+            If Comp.Designator.Text = Designator Then
+            Begin
+                Hit := True;
+                If Narrow Then
+                Begin
+                    { Read through a materialized local. This engine does not }
+                    { accept a record field reached straight off a property.  }
+                    CompLoc := Comp.Location;
+                    Hit := (CoordToMils(CompLoc.X) = WantX)
+                       And (CoordToMils(CompLoc.Y) = WantY);
+                End;
+                If Hit Then Result := Comp;
+            End;
+            Obj := Iterator.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iterator);
+    End;
+End;
+
+{ Every symbol carrying the designator, as a JSON array. A refusal hands this  }
+{ back so the caller can re-issue against one of them, rather than being told  }
+{ only that the request was ambiguous.                                         }
+Function SchComponentCandidates(SchDoc : ISch_Document; Designator : String) : String;
+Var
+    Iterator : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    CompLoc : TLocation;
+    Entry, PartId, PartCnt, Uid : String;
+    First : Boolean;
+Begin
+    Result := '[]';
+    If SchDoc = Nil Then Exit;
+    Result := '[';
+    First := True;
+    Iterator := SchDoc.SchIterator_Create;
+    Try
+        Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iterator.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            Comp := Obj;
+            If Comp.Designator.Text = Designator Then
+            Begin
+                CompLoc := Comp.Location;
+                PartId := '0';
+                PartCnt := '0';
+                Uid := '';
+                Try PartId := IntToStr(Comp.CurrentPartID); Except End;
+                Try PartCnt := IntToStr(Comp.PartCount); Except End;
+                Try Uid := Comp.UniqueId; Except End;
+                Entry := '{"location_x":' + IntToStr(CoordToMils(CompLoc.X))
+                    + ',"location_y":' + IntToStr(CoordToMils(CompLoc.Y))
+                    + ',"current_part_id":' + PartId
+                    + ',"part_count":' + PartCnt
+                    + ',"unique_id":"' + EscapeJsonString(Uid) + '"}';
+                If Not First Then Result := Result + ',';
+                Result := Result + Entry;
+                First := False;
+            End;
+            Obj := Iterator.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iterator);
+    End;
+    Result := Result + ']';
+End;
+
+{ The refusal itself, so every handler words it the same way and none of them  }
+{ can drift back into choosing one silently.                                   }
+Function AmbiguousDesignator(SchDoc : ISch_Document; Designator : String;
+                             Total : Integer; RequestId : String) : String;
+Begin
+    Result := BuildErrorResponseDetailed(RequestId, 'AMBIGUOUS_DESIGNATOR',
+        'There are ' + IntToStr(Total) + ' symbols designated ' + Designator
+        + ' on this sheet, which is normal for a multi-part device. Pass '
+        + 'location_x and location_y to choose one. The candidates, with '
+        + 'their locations and current part ids, are in the details.',
+        '"candidates":' + SchComponentCandidates(SchDoc, Designator));
+End;
+
 Function Gen_GetSchComponentPins(Params : String; RequestId : String) : String;
 Var
     Designator, SheetPath : String;
@@ -4323,6 +4508,7 @@ Var
     PinOrient, PinLenMils : Integer;
     CompX, CompY : Integer;
     CompLoc : TLocation;
+    SymbolCount, OwnerPart : Integer;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
     SheetPath := ExtractJsonValue(Params, 'sheet_path');
@@ -4359,16 +4545,25 @@ Begin
     Found := False;
     PinList := '';
     First := True;
+    SymbolCount := 0;
 
     Iter := SchDoc.SchIterator_Create;
     Try
         Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
         Comp := Iter.FirstSchObject;
-        While (Comp <> Nil) And (Not Found) Do
+        { EVERY symbol carrying the designator. A multi-part device places  }
+        { one per sub-part and a placed instance exposes only its own       }
+        { part's pins, so stopping at the first returned a third of a dual  }
+        { device's pins as a plain answer, with nothing to say the rest     }
+        { existed. Each pin now names the symbol it came from.              }
+        While Comp <> Nil Do
         Begin
             If Comp.Designator.Text = Designator Then
             Begin
                 Found := True;
+                SymbolCount := SymbolCount + 1;
+                OwnerPart := 0;
+                Try OwnerPart := Comp.CurrentPartID; Except End;
 
                 { CORRECTION: for an ISch_Pin attached to a placed             }
                 { ISch_Component on a SchDoc, Pin.Location is ALREADY the      }
@@ -4420,7 +4615,20 @@ Begin
                             '","x_mils":' + IntToStr(PinX) +
                             ',"y_mils":' + IntToStr(PinY) +
                             ',"orientation":' + IntToStr(PinOrient) +
-                            ',"pin_length_mils":' + IntToStr(PinLenMils) + '}';
+                            ',"pin_length_mils":' + IntToStr(PinLenMils) +
+                            { x_mils and y_mils are Pin.Location, which is the
+                              BODY-SIDE ROOT. These are the point a wire has
+                              to sit on. Handed over rather than left to the
+                              caller, because deriving it by hand is where the
+                              direction gets reversed and the result is silent
+                              geometry that does not connect. }
+                            ',"connection_x_mils":'
+                                + IntToStr(PinEndX(PinX, PinOrient, PinLenMils)) +
+                            ',"connection_y_mils":'
+                                + IntToStr(PinEndY(PinY, PinOrient, PinLenMils)) +
+                            ',"owner_part_id":' + IntToStr(OwnerPart) +
+                            ',"owner_x":' + IntToStr(CompX) +
+                            ',"owner_y":' + IntToStr(CompY) + '}';
 
                         Pin := PinIter.NextSchObject;
                     End;
@@ -4442,7 +4650,8 @@ Begin
     End;
 
     Data := '{"designator":"' + EscapeJsonString(Designator) +
-        '","pins":[' + PinList + ']}';
+        '","symbols":' + IntToStr(SymbolCount) +
+        ',"pins":[' + PinList + ']}';
     Result := BuildSuccessResponse(RequestId, Data);
 End;
 
@@ -5277,6 +5486,7 @@ End;
 
 Function Gen_ReplaceComponent(Params : String; RequestId : String) : String;
 Var
+    AmbigTotal : Integer;
     Designator, NewLibRef, NewLibrary : String;
     SchDoc : ISch_Document;
     Iterator : ISch_Iterator;
@@ -5305,6 +5515,16 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
     End;
+    { A multi-part device gives every sub-part the same designator, so a
+      first-match here wrote whichever symbol the iterator reached and
+      called it success. Refuse instead, and hand back the candidates. }
+    AmbigTotal := SchComponentCount(SchDoc, Designator);
+    If AmbigTotal > 1 Then
+    Begin
+        Result := AmbiguousDesignator(SchDoc, Designator, AmbigTotal, RequestId);
+        Exit;
+    End;
+
 
     Found := False;
     Iterator := SchDoc.SchIterator_Create;
@@ -5534,16 +5754,16 @@ End;
 
 Function Gen_SetComponentPartId(Params : String; RequestId : String) : String;
 Var
-    Designator : String;
-    PartId : Integer;
+    Designator, LocX, LocY : String;
+    PartId, PartIdAfter, Total : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
-    Found : Boolean;
-    Iterator : ISch_Iterator;
-    Obj : ISch_GraphicalObject;
+    CompLoc : TLocation;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
     PartId := StrToIntDef(ExtractJsonValue(Params, 'part_id'), 0);
+    LocX := ExtractJsonValue(Params, 'location_x');
+    LocY := ExtractJsonValue(Params, 'location_y');
 
     If Designator = '' Then
     Begin
@@ -5564,34 +5784,56 @@ Begin
         Exit;
     End;
 
-    Found := False;
-    Iterator := SchDoc.SchIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
-    Obj := Iterator.FirstSchObject;
-    While (Obj <> Nil) And Not Found Do
-    Begin
-        Comp := Obj;
-        If Comp.Designator.Text = Designator Then
-        Begin
-            SchServer.ProcessControl.PreProcess(SchDoc, 'Set part id');
-            Try Comp.CurrentPartID := PartId; Except End;
-            SchServer.ProcessControl.PostProcess(SchDoc, 'Set part id');
-            Found := True;
-        End;
-        Obj := Iterator.NextSchObject;
-    End;
-    SchDoc.SchIterator_Destroy(Iterator);
-    SchDoc.GraphicallyInvalidate;
-
-    If Not Found Then
+    Total := SchComponentCount(SchDoc, Designator);
+    If Total = 0 Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Component not found: ' + Designator);
         Exit;
     End;
 
+    { Choosing for the caller is the bug this replaces. Every sub-part of a }
+    { multi-part device carries the same designator, so picking the first   }
+    { wrote whichever the iterator happened to reach and called it success. }
+    If (Total > 1) And ((LocX = '') Or (LocY = '')) Then
+    Begin
+        Result := AmbiguousDesignator(SchDoc, Designator, Total, RequestId);
+        Exit;
+    End;
+
+    Comp := SchComponentAt(SchDoc, Designator, LocX, LocY);
+    If Comp = Nil Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'NOT_FOUND',
+            'No symbol designated ' + Designator + ' at that location.',
+            '"candidates":' + SchComponentCandidates(SchDoc, Designator));
+        Exit;
+    End;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, 'Set part id');
+    Try Comp.CurrentPartID := PartId; Except End;
+    SchServer.ProcessControl.PostProcess(SchDoc, 'Set part id');
+    SchDoc.GraphicallyInvalidate;
+
+    { Read back. A part id past PartCount is accepted by the assignment and }
+    { simply does not take, which used to be reported as a success.         }
+    PartIdAfter := -1;
+    Try PartIdAfter := Comp.CurrentPartID; Except End;
+    If PartIdAfter <> PartId Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'WRITE_REFUSED',
+            'Set part_id ' + IntToStr(PartId) + ' on ' + Designator
+            + ' and it reads back ' + IntToStr(PartIdAfter)
+            + '. A part id above PartCount does not take.');
+        Exit;
+    End;
+
+    CompLoc := Comp.Location;
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"designator":"' + EscapeJsonString(Designator)
-        + '","part_id":' + IntToStr(PartId) + '}');
+        + '","part_id":' + IntToStr(PartIdAfter)
+        + ',"location_x":' + IntToStr(CoordToMils(CompLoc.X))
+        + ',"location_y":' + IntToStr(CoordToMils(CompLoc.Y))
+        + ',"matched":' + IntToStr(Total) + '}');
 End;
 
 {..............................................................................}
@@ -5604,12 +5846,14 @@ End;
 
 Function Gen_SetComponentUniqueId(Params : String; RequestId : String) : String;
 Var
-    Designator, UniqueIdStr, AfterId : String;
+    Designator, UniqueIdStr, AfterId, Details : String;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
-    Found : Boolean;
+    CompLoc : TLocation;
     Iterator : ISch_Iterator;
     Obj : ISch_GraphicalObject;
+    Written, Refused, Total : Integer;
+    First : Boolean;
 Begin
     Designator := ExtractJsonValue(Params, 'designator');
     UniqueIdStr := ExtractJsonValue(Params, 'unique_id');
@@ -5633,31 +5877,70 @@ Begin
         Exit;
     End;
 
-    Found := False;
+    { EVERY SYMBOL WITH THIS DESIGNATOR, not the first one. That is the    }
+    { point of the property: ECO treats sub-parts as one physical package  }
+    { only when they SHARE a UniqueId, so stamping one of three and        }
+    { reporting success left the other two pointing at packages of their   }
+    { own, which is the exact condition this tool exists to repair.        }
+    { MEASURED on a live sheet: three symbols designated U13, three        }
+    { different UniqueIds, one dual device.                                }
     AfterId := '';
+    Written := 0;
+    Refused := 0;
+    Total := 0;
+    Details := '[';
+    First := True;
     Iterator := SchDoc.SchIterator_Create;
-    Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
-    Obj := Iterator.FirstSchObject;
-    While (Obj <> Nil) And Not Found Do
-    Begin
-        Comp := Obj;
-        If Comp.Designator.Text = Designator Then
+    Try
+        Iterator.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iterator.FirstSchObject;
+        While Obj <> Nil Do
         Begin
-            SchServer.ProcessControl.PreProcess(SchDoc, 'Set UniqueId');
-            Try Comp.SetState_UniqueId(UniqueIdStr); Except End;
-            Try Comp.UniqueId := UniqueIdStr; Except End;
-            Try AfterId := Comp.UniqueId; Except AfterId := ''; End;
-            SchServer.ProcessControl.PostProcess(SchDoc, 'Set UniqueId');
-            Found := True;
+            Comp := Obj;
+            If Comp.Designator.Text = Designator Then
+            Begin
+                Total := Total + 1;
+                SchServer.ProcessControl.PreProcess(SchDoc, 'Set UniqueId');
+                Try Comp.SetState_UniqueId(UniqueIdStr); Except End;
+                Try Comp.UniqueId := UniqueIdStr; Except End;
+                Try AfterId := Comp.UniqueId; Except AfterId := ''; End;
+                SchServer.ProcessControl.PostProcess(SchDoc, 'Set UniqueId');
+
+                If AfterId = UniqueIdStr Then
+                    Written := Written + 1
+                Else
+                    Refused := Refused + 1;
+
+                CompLoc := Comp.Location;
+                If Not First Then Details := Details + ',';
+                Details := Details
+                    + '{"location_x":' + IntToStr(CoordToMils(CompLoc.X))
+                    + ',"location_y":' + IntToStr(CoordToMils(CompLoc.Y))
+                    + ',"unique_id_after":"' + EscapeJsonString(AfterId) + '"}';
+                First := False;
+            End;
+            Obj := Iterator.NextSchObject;
         End;
-        Obj := Iterator.NextSchObject;
+    Finally
+        SchDoc.SchIterator_Destroy(Iterator);
     End;
-    SchDoc.SchIterator_Destroy(Iterator);
+    Details := Details + ']';
     SchDoc.GraphicallyInvalidate;
 
-    If Not Found Then
+    If Total = 0 Then
     Begin
         Result := BuildErrorResponse(RequestId, 'NOT_FOUND', 'Component not found: ' + Designator);
+        Exit;
+    End;
+
+    If Refused > 0 Then
+    Begin
+        Result := BuildErrorResponseDetailed(RequestId, 'WRITE_REFUSED',
+            'Stamped ' + IntToStr(Written) + ' of ' + IntToStr(Total)
+            + ' symbols designated ' + Designator + '. Altium mints '
+            + 'UniqueIds itself and kept its own on the rest, so those '
+            + 'sub-parts still belong to separate packages.',
+            '"symbols":' + Details);
         Exit;
     End;
 
@@ -5667,24 +5950,12 @@ Begin
       the write had not taken. Altium mints UniqueIds itself and this is
       the property it is most likely to overrule, which is the whole
       reason the read back exists. }
-    If AfterId = UniqueIdStr Then
-        Result := BuildSuccessResponse(RequestId,
-            JsonObj(
-                JsonBool('success', True) + ',' +
-                JsonStr('designator', Designator) + ',' +
-                JsonStr('unique_id', UniqueIdStr) + ',' +
-                JsonStr('unique_id_after', AfterId)
-            ))
-    Else
-        Result := BuildSuccessResponse(RequestId,
-            JsonObj(
-                JsonBool('success', False) + ',' +
-                JsonStr('designator', Designator) + ',' +
-                JsonStr('unique_id', UniqueIdStr) + ',' +
-                JsonStr('unique_id_after', AfterId) + ',' +
-                JsonStr('reason', 'the component kept its own id; Altium '
-                    + 'declined the assignment')
-            ));
+    Result := BuildSuccessResponse(RequestId,
+        '{"success":true,"designator":"' + EscapeJsonString(Designator)
+        + '","unique_id":"' + EscapeJsonString(UniqueIdStr)
+        + '","symbols_written":' + IntToStr(Written)
+        + ',"symbols_found":' + IntToStr(Total)
+        + ',"symbols":' + Details + '}');
 End;
 
 {..............................................................................}
@@ -5698,6 +5969,7 @@ End;
 
 Function Gen_ReplicateSchComponent(Params : String; RequestId : String) : String;
 Var
+    AmbigTotal : Integer;
     Designator, NewDesig, MasterId, CopyId : String;
     IdAfterReplicate, IdAfterSetPreAdd, IdAfterAdd, Shared : String;
     PartId, X, Y : Integer;
@@ -5728,6 +6000,16 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
     End;
+    { A multi-part device gives every sub-part the same designator, so a
+      first-match here wrote whichever symbol the iterator reached and
+      called it success. Refuse instead, and hand back the candidates. }
+    AmbigTotal := SchComponentCount(SchDoc, Designator);
+    If AmbigTotal > 1 Then
+    Begin
+        Result := AmbiguousDesignator(SchDoc, Designator, AmbigTotal, RequestId);
+        Exit;
+    End;
+
 
     Found := False;
     MasterId := '';
@@ -5880,6 +6162,7 @@ End;
 
 Function Gen_AddDatafileLink(Params : String; RequestId : String) : String;
 Var
+    AmbigTotal : Integer;
     Designator, FilePath, KindStr, EntityName : String;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
@@ -5904,6 +6187,16 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
     End;
+    { A multi-part device gives every sub-part the same designator, so a
+      first-match here wrote whichever symbol the iterator reached and
+      called it success. Refuse instead, and hand back the candidates. }
+    AmbigTotal := SchComponentCount(SchDoc, Designator);
+    If AmbigTotal > 1 Then
+    Begin
+        Result := AmbiguousDesignator(SchDoc, Designator, AmbigTotal, RequestId);
+        Exit;
+    End;
+
 
     Found := False;
     Iterator := SchDoc.SchIterator_Create;
@@ -6459,6 +6752,7 @@ End;
 
 Function Gen_AttachSpicePrimitive(Params : String; RequestId : String) : String;
 Var
+    AmbigTotal : Integer;
     SchDoc : ISch_Document;
     Iter : ISch_Iterator;
     Obj : ISch_GraphicalObject;
@@ -6485,6 +6779,16 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
     End;
+    { A multi-part device gives every sub-part the same designator, so a
+      first-match here wrote whichever symbol the iterator reached and
+      called it success. Refuse instead, and hand back the candidates. }
+    AmbigTotal := SchComponentCount(SchDoc, Designator);
+    If AmbigTotal > 1 Then
+    Begin
+        Result := AmbiguousDesignator(SchDoc, Designator, AmbigTotal, RequestId);
+        Exit;
+    End;
+
 
     Found := False;
     SchServer.ProcessControl.PreProcess(SchDoc, 'Attach SPICE primitive');
@@ -6540,6 +6844,7 @@ End;
 
 Function Gen_AttachSpiceModel(Params : String; RequestId : String) : String;
 Var
+    AmbigTotal : Integer;
     SchDoc : ISch_Document;
     Iter : ISch_Iterator;
     Obj : ISch_GraphicalObject;
@@ -6567,6 +6872,16 @@ Begin
         Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
         Exit;
     End;
+    { A multi-part device gives every sub-part the same designator, so a
+      first-match here wrote whichever symbol the iterator reached and
+      called it success. Refuse instead, and hand back the candidates. }
+    AmbigTotal := SchComponentCount(SchDoc, Designator);
+    If AmbigTotal > 1 Then
+    Begin
+        Result := AmbiguousDesignator(SchDoc, Designator, AmbigTotal, RequestId);
+        Exit;
+    End;
+
 
     Found := False;
     SchServer.ProcessControl.PreProcess(SchDoc, 'Attach SPICE model');
@@ -7678,6 +7993,15 @@ Begin
             Begin
                 Inc(Failed);
                 ItemReason := 'MISSING_FIELDS';
+            End
+            Else If SchComponentCount(SchDoc, Designator) > 1 Then
+            Begin
+                { One ITEM is refused, not the whole batch: the others are
+                  unambiguous and there is no reason to lose them. A
+                  multi-part device shares its designator across sub-parts,
+                  so attaching to the first would pick one arbitrarily. }
+                Inc(Failed);
+                ItemReason := 'AMBIGUOUS_DESIGNATOR';
             End
             Else
             Begin

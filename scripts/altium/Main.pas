@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.08.30.1';
+    SCRIPT_VERSION = '2026.08.31.2';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -63,6 +63,9 @@ Var
     { pointer it was run against, so we only skip when the SAME project was    }
     { compiled recently. Reset to 0 / Nil at startup.                          }
     LastCompileTick : Cardinal;
+    { Documents the last save pass actually reached. See
+      SaveOneDocByDocRef. Reset by App_SaveAll before each pass. }
+    SaveAttempts : Integer;
     LastCompiledProject : IProject;
 
     { Silent cast-failure counter, incremented every time a defensive       }
@@ -209,21 +212,69 @@ Var
     I : Integer;
     Doc : IDocument;
     ServerDoc : IServerDocument;
+    Readable : Boolean;
 Begin
+    { UNREADABLE IS NOT CLEAN. This used to swallow the exception and carry
+      on, so a project whose documents could not be reached at all reported
+      nothing dirty and the cached netlist was reused. Reading nothing and
+      there being nothing are different answers and only one of them means
+      the cache is still good.
+
+      A Nil ServerDoc is the exception to that and stays clean on purpose:
+      it means the document is not open in the editor, and a closed
+      document cannot be holding unsaved edits. Treating it as dirty would
+      force a recompile on every call for any project with a closed sheet,
+      which is most of them. }
     Result := False;
     If Project = Nil Then Exit;
     For I := 0 To Project.DM_LogicalDocumentCount - 1 Do
     Begin
-        Doc := Project.DM_LogicalDocuments(I);
-        If Doc = Nil Then Continue;
+        Doc := Nil;
+        Try
+            Doc := Project.DM_LogicalDocuments(I);
+        Except
+            { Written out rather than swallowed, so the next reader can see
+              that the failure is handled by the Nil check below and not
+              simply ignored. }
+            Doc := Nil;
+        End;
+        If Doc = Nil Then
+        Begin
+            { The project structure would not answer for one of its own
+              documents. Say dirty and recompile rather than guess. }
+            Result := True;
+            Exit;
+        End;
+
+        ServerDoc := Nil;
+        Readable := False;
         Try
             ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
-            If (ServerDoc <> Nil) And ServerDoc.Modified Then
-            Begin
+            Readable := True;
+        Except
+            Readable := False;
+        End;
+
+        If Not Readable Then
+        Begin
+            Result := True;
+            Exit;
+        End;
+
+        If ServerDoc <> Nil Then
+        Begin
+            Try
+                If ServerDoc.Modified Then
+                Begin
+                    Result := True;
+                    Exit;
+                End;
+            Except
+                { Could not read the flag, so it is not evidence of clean. }
                 Result := True;
                 Exit;
             End;
-        Except End;
+        End;
     End;
 End;
 
@@ -535,6 +586,11 @@ Var
 Begin
     If Doc = Nil Then Exit;
     Try
+        { Only a document OPEN in the editor has an IServerDocument. A
+          closed project member returns Nil and is skipped, correctly: it
+          cannot be holding unsaved edits. SaveAttempts counts the ones
+          actually reached, so a pass that wrote nothing because nothing
+          was open is not confused with one the editor declined. }
         ServerDoc := Client.GetDocumentByPath(Doc.DM_FullPath);
         { Unconditional flush, Modified flag does not always propagate from   }
         { ProcessControl.PostProcess to the IServerDocument layer in newer    }
@@ -542,6 +598,7 @@ Begin
         { on a clean doc is a fast no-op.                                     }
         If ServerDoc <> Nil Then
         Begin
+            SaveAttempts := SaveAttempts + 1;
             Try ServerDoc.SetModified(True); Except End;
             Try ServerDoc.DoFileSave(''); Except End;
         End;
@@ -685,6 +742,148 @@ Begin
     Try
         Result := MatchDocPathInProject(Workspace.DM_FreeDocumentsProject, Wanted);
     Except End;
+End;
+
+{..............................................................................}
+{ Did the save actually write anything.                                        }
+{                                                                              }
+{ app_save_all used to answer this with CountDirtyDocuments, which walks the   }
+{ workspace exactly the way SaveAllDirty does: same GetWorkspace, same         }
+{ DM_Projects loop, same silent Exit when the workspace is Nil. So when the    }
+{ enumeration came back empty the save wrote nothing AND the check counted     }
+{ nothing, and zero was reported as success. A verifier that shares the        }
+{ failure mode of the thing it verifies cannot catch it.                       }
+{                                                                              }
+{ It also read ServerDoc.Modified, which SaveOneDocByDocRef already documents  }
+{ as unreliable: the flag does not always propagate from                       }
+{ ProcessControl.PostProcess to the IServerDocument layer on newer builds.     }
+{ MEASURED: dirty_doc_count 0 immediately after a wire placement and an entry  }
+{ move, and 29 property edits lost on reload while app_save_all reported       }
+{ saved:true throughout.                                                       }
+{                                                                              }
+{ FILE TIMESTAMPS ARE THE GROUND TRUTH. A document either got newer on disk    }
+{ or it did not, and that answer does not depend on any Altium flag.           }
+{..............................................................................}
+
+Function WorkspaceDocPaths(Dummy : Integer) : String;
+Var
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    I, J : Integer;
+    Path : String;
+Begin
+    Result := '';
+    Workspace := GetWorkspace;
+    If Workspace = Nil Then Exit;
+    For I := 0 To Workspace.DM_ProjectCount - 1 Do
+    Begin
+        Project := Nil;
+        Try Project := Workspace.DM_Projects(I); Except End;
+        If Project = Nil Then Continue;
+        For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+        Begin
+            Doc := Nil;
+            Try Doc := Project.DM_LogicalDocuments(J); Except End;
+            If Doc = Nil Then Continue;
+            Path := '';
+            Try Path := Doc.DM_FullPath; Except End;
+            If Path <> '' Then
+            Begin
+                If Result <> '' Then Result := Result + '|';
+                Result := Result + Path;
+            End;
+        End;
+    End;
+End;
+
+{ File age for each pipe-separated path, as its own pipe-separated list.       }
+{ A path that does not exist yet reports -1, which simply cannot match a       }
+{ later age and therefore counts as written once it appears.                   }
+
+Function AgesForPaths(PathList : String) : String;
+Var
+    Remaining, Path : String;
+    P, Age : Integer;
+Begin
+    Result := '';
+    Remaining := PathList;
+    While Remaining <> '' Do
+    Begin
+        P := Pos('|', Remaining);
+        If P > 0 Then
+        Begin
+            Path := Copy(Remaining, 1, P - 1);
+            Remaining := Copy(Remaining, P + 1, Length(Remaining) - P);
+        End
+        Else
+        Begin
+            Path := Remaining;
+            Remaining := '';
+        End;
+        Age := -1;
+        Try Age := FileAge(Path); Except Age := -1; End;
+        If Result <> '' Then Result := Result + '|';
+        Result := Result + IntToStr(Age);
+    End;
+End;
+
+{ How many entries differ between two age lists of the same shape.             }
+
+Function CountChangedAges(BeforeList : String; AfterList : String) : Integer;
+Var
+    RemA, RemB, A, B : String;
+    P : Integer;
+Begin
+    Result := 0;
+    RemA := BeforeList;
+    RemB := AfterList;
+    While (RemA <> '') And (RemB <> '') Do
+    Begin
+        P := Pos('|', RemA);
+        If P > 0 Then
+        Begin
+            A := Copy(RemA, 1, P - 1);
+            RemA := Copy(RemA, P + 1, Length(RemA) - P);
+        End
+        Else
+        Begin
+            A := RemA;
+            RemA := '';
+        End;
+
+        P := Pos('|', RemB);
+        If P > 0 Then
+        Begin
+            B := Copy(RemB, 1, P - 1);
+            RemB := Copy(RemB, P + 1, Length(RemB) - P);
+        End
+        Else
+        Begin
+            B := RemB;
+            RemB := '';
+        End;
+
+        If A <> B Then Result := Result + 1;
+    End;
+End;
+
+Function CountPathEntries(PathList : String) : Integer;
+Var
+    Remaining : String;
+    P : Integer;
+Begin
+    Result := 0;
+    Remaining := PathList;
+    While Remaining <> '' Do
+    Begin
+        Result := Result + 1;
+        P := Pos('|', Remaining);
+        If P > 0 Then
+            Remaining := Copy(Remaining, P + 1, Length(Remaining) - P)
+        Else
+            Remaining := '';
+    End;
 End;
 
 Procedure SaveAllDirty(Dummy : Integer);

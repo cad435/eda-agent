@@ -85,11 +85,11 @@ Begin
         End
         Else If PropName = 'StartAngle' Then
         Begin
-            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToStr(Arc.StartAngle); End;
+            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToJsonStr(Arc.StartAngle); End;
         End
         Else If PropName = 'EndAngle' Then
         Begin
-            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToStr(Arc.EndAngle); End;
+            If Oid = eArcObject Then Begin Arc := Obj; Result := FloatToJsonStr(Arc.EndAngle); End;
         End
         Else If PropName = 'HoleSize' Then
         Begin
@@ -114,9 +114,9 @@ Begin
         End
         Else If PropName = 'Rotation' Then
         Begin
-            If Oid = eComponentObject Then Begin Comp := Obj; Result := FloatToStr(Comp.Rotation); End
-            Else If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToStr(Pad.Rotation); End
-            Else If Oid = eTextObject Then Begin Txt := Obj; Result := FloatToStr(Txt.Rotation); End;
+            If Oid = eComponentObject Then Begin Comp := Obj; Result := FloatToJsonStr(Comp.Rotation); End
+            Else If Oid = ePadObject Then Begin Pad := Obj; Result := FloatToJsonStr(Pad.Rotation); End
+            Else If Oid = eTextObject Then Begin Txt := Obj; Result := FloatToJsonStr(Txt.Rotation); End;
         End
         Else If PropName = 'Pattern' Then
         Begin

@@ -1184,7 +1184,7 @@ Begin
             { "Top Overlay" in a batch silently put that pad on top copper.     }
             If HoleSize > 0 Then PadLayer := eMultiLayer
             Else If LayerStr = '' Then PadLayer := eTopLayer
-            Else PadLayer := ResolveLayerId(Board, LayerStr);
+            Else PadLayer := ResolveLayerId(PcbLib.Board, LayerStr);
             If PadLayer = eNoLayer Then
             Begin
                 Inc(Failed);

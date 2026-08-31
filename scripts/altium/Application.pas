@@ -573,32 +573,68 @@ End;
 
 Function App_SaveAll(RequestId : String) : String;
 Var
-    StillDirty : Integer;
+    StillDirty, Seen, Written : Integer;
+    Paths, AgesBefore, AgesAfter : String;
 Begin
     Try
         // Iterate every IServerDocument the editor has open and DoFileSave
         // each modified one. This bypasses WorkspaceManager:SaveAll, which
         // silently no-ops in some workspace states, and project-walk-based
         // saves, which skip free documents.
+        { WHAT REACHED DISK, measured by file timestamp, because every
+          Altium-side signal here has been observed lying. DoFileSave does
+          not raise when the editor declines. ServerDoc.Modified does not
+          always propagate from ProcessControl. And CountDirtyDocuments
+          walks the workspace exactly as SaveAllDirty does, so an empty
+          enumeration made both of them report zero and zero read as
+          success while 29 edits were lost. }
+        Paths := WorkspaceDocPaths(0);
+        Seen := CountPathEntries(Paths);
+        AgesBefore := AgesForPaths(Paths);
+
+        SaveAttempts := 0;
         SaveAllDirty(0);
 
-        { COUNT WHAT IS STILL DIRTY. DoFileSave does not raise when the      }
-        { editor declines, so "no exception" was never evidence of a save.   }
-        { MEASURED: Altium raised "A command is currently active and save    }
-        { cannot be completed at this time" once per dirty document, every   }
-        { one of those saves was declined, and this returned saved:true.     }
+        AgesAfter := AgesForPaths(Paths);
+        Written := CountChangedAges(AgesBefore, AgesAfter);
         StillDirty := CountDirtyDocuments(0);
-        If StillDirty = 0 Then
+
+        If Seen = 0 Then
             Result := BuildSuccessResponse(RequestId,
-                '{"saved":true,"still_dirty":0}')
+                '{"saved":false,"documents_seen":0,"documents_written":0'
+                + ',"still_dirty":' + IntToStr(StillDirty)
+                + ',"reason":"no documents were enumerated, so nothing was '
+                + 'even attempted. This is NOT an empty-and-clean workspace: '
+                + 'the walk that saves and the count that verifies share a '
+                + 'workspace lookup, so when it comes back empty both report '
+                + 'zero. Use proj_save, which resolves the focused project '
+                + 'directly."}')
+        Else If SaveAttempts = 0 Then
+            Result := BuildSuccessResponse(RequestId,
+                '{"saved":true,"documents_seen":' + IntToStr(Seen)
+                + ',"documents_attempted":0,"documents_written":0'
+                + ',"still_dirty":' + IntToStr(StillDirty)
+                + ',"note":"nothing was open to save. Only a document open '
+                + 'in the editor has an IServerDocument; the rest are project '
+                + 'members that cannot be holding unsaved edits. Writing '
+                + 'nothing is the correct outcome here, not a failure."}')
+        Else If Written = 0 Then
+            Result := BuildSuccessResponse(RequestId,
+                '{"saved":false,"documents_seen":' + IntToStr(Seen)
+                + ',"documents_attempted":' + IntToStr(SaveAttempts)
+                + ',"documents_written":0'
+                + ',"still_dirty":' + IntToStr(StillDirty)
+                + ',"reason":"every open document was written to and not one '
+                + 'got newer on disk. Altium declines a save while a command '
+                + 'is active in the editor, and an abandoned transaction '
+                + 'leaves it in that state with nothing visible on screen. '
+                + 'Unwind the active command and retry, or use proj_save."}')
         Else
             Result := BuildSuccessResponse(RequestId,
-                '{"saved":false,"still_dirty":' + IntToStr(StillDirty) + ''
-                + ',"reason":"documents remain modified after the save pass. '
-                + 'Altium declines a save while a command is active in the '
-                + 'editor, and asks whether to write a copy instead; that '
-                + 'prompt is answered by a human, not here. Clear the active '
-                + 'command and retry."}');
+                '{"saved":true,"documents_seen":' + IntToStr(Seen)
+                + ',"documents_attempted":' + IntToStr(SaveAttempts)
+                + ',"documents_written":' + IntToStr(Written)
+                + ',"still_dirty":' + IntToStr(StillDirty) + '}');
     Except
         Result := BuildErrorResponse(RequestId, 'SAVE_FAILED', 'SaveAllDirty raised an exception');
     End;

@@ -10,6 +10,7 @@ a pass-through layer for object iteration, property access, and process executio
 from typing import Any, Optional
 from ..bridge.payload import payload_safe
 from ..bridge import get_bridge
+from .pin_hints import pin_location_hint
 from ..scope import to_wire as scope_to_wire
 from .bulk_hints import BulkHintTracker
 
@@ -112,6 +113,12 @@ def register_generic_tools(mcp):
             "generic.query_objects",
             params,
         )
+        # Pin location is the body root, not the connection point, and
+        # that keeps being rediscovered by getting it wrong. Say it on
+        # the reply the caller is already reading.
+        hint = pin_location_hint(object_type, properties)
+        if hint and isinstance(result, dict):
+            result["_hint_pin_connection"] = hint
         return result
 
     @mcp.tool()
@@ -2000,6 +2007,8 @@ def register_generic_tools(mcp):
     async def sch_set_component_part_id(
         designator: str,
         part_id: int,
+        location_x: int | None = None,
+        location_y: int | None = None,
     ) -> dict[str, Any]:
         """Switch the active sub-part on a multi-part schematic component.
 
@@ -2007,17 +2016,40 @@ def register_generic_tools(mcp):
         (U1A, U1B, U1C, U1D). CurrentPartID selects which one this
         symbol instance represents. IDs are 1-based.
 
+        A DESIGNATOR IS NOT UNIQUE HERE. Every sub-part of a multi-part
+        device carries the same one, so "U13" can name three symbols on
+        the sheet. When it names more than one and no location is given
+        this REFUSES, and returns the candidates with their locations,
+        current part ids and unique ids. It used to write whichever the
+        iterator reached first and report success naming only the
+        designator, so the caller could not tell which symbol changed.
+
+        Location is the discriminator because the alternatives do not
+        work: two symbols can sit on the same part, and sub-parts of one
+        physical device are supposed to SHARE a unique id.
+
         Args:
             designator: Component reference (e.g., "U1").
-            part_id: Sub-part index, 1-based (1=A, 2=B, ...).
+            part_id: Sub-part index, 1-based (1=A, 2=B, ...). A value
+                above PartCount is accepted by Altium and does not take,
+                so the result is read back and a mismatch is reported.
+            location_x: Symbol X in mils, to choose one of several.
+            location_y: Symbol Y in mils, to choose one of several.
 
         Returns:
-            Dict with success, designator, part_id.
+            Dict with success, designator, part_id, the location written
+            and how many symbols carried the designator. On ambiguity,
+            an AMBIGUOUS_DESIGNATOR error carrying `candidates`.
         """
         bridge = get_bridge()
+        params: dict[str, str] = {
+            "designator": designator, "part_id": str(part_id)}
+        if location_x is not None:
+            params["location_x"] = str(int(location_x))
+        if location_y is not None:
+            params["location_y"] = str(int(location_y))
         return await bridge.send_command_async(
-            "generic.set_component_part_id",
-            {"designator": designator, "part_id": str(part_id)},
+            "generic.set_component_part_id", params,
         )
 
     @mcp.tool()
@@ -2025,19 +2057,31 @@ def register_generic_tools(mcp):
         designator: str,
         unique_id: str,
     ) -> dict[str, Any]:
-        """Set UniqueId on a placed schematic component.
+        """Set UniqueId on every placed symbol with this designator.
 
         ECO treats sub-parts of a multi-gate symbol (quad comparator,
         dual op-amp) as one physical footprint only when they share
         UniqueId. Four copies of part 1 with four UniqueIds become four
         packages.
 
+        EVERY MATCHING SYMBOL IS STAMPED, not the first. Sharing the id
+        is the whole point of the property, so writing one of three and
+        reporting success left the other two pointing at packages of
+        their own, which is the exact condition this repairs.
+
+        Altium mints UniqueIds itself and may keep its own. Each write
+        is read back and COMPARED; if any symbol kept its old id the
+        call fails and names which ones, because a partial stamp still
+        leaves the device split.
+
         Args:
             designator: Component reference as drawn (e.g. "U_COMP2B").
             unique_id: Target UniqueId, usually copied from the A unit.
 
         Returns:
-            Dict with success, designator, unique_id, unique_id_after.
+            Dict with success, designator, unique_id, symbols_written,
+            symbols_found, and per-symbol locations with the id each
+            reads back.
         """
         bridge = get_bridge()
         return await bridge.send_command_async(
