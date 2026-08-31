@@ -886,36 +886,36 @@ End;
 
 { --- From Dispatcher.pas. Kept byte-identical to the original; }
 { tests/test_netlist_cache_staleness.py fails if they diverge.  }
-Function ActionHasPrefix(Action : String; Prefix : String) : Boolean;
+Function ActionHasPrefix(Verb : String; Prefix : String) : Boolean;
 Begin
-    Result := Copy(Action, 1, Length(Prefix)) = Prefix;
+    Result := Copy(Verb, 1, Length(Prefix)) = Prefix;
 End;
 
 Function CommandIsReadOnly(Command : String) : Boolean;
 Var
-    Action : String;
+    Verb : String;
     DotPos : Integer;
 Begin
-    Action := LowerCase(Trim(Command));
-    DotPos := Pos('.', Action);
-    If DotPos > 0 Then Action := Copy(Action, DotPos + 1, Length(Action) - DotPos);
+    Verb := LowerCase(Trim(Command));
+    DotPos := Pos('.', Verb);
+    If DotPos > 0 Then Verb := Copy(Verb, DotPos + 1, Length(Verb) - DotPos);
 
-    Result := ActionHasPrefix(Action, 'get_')
-           Or ActionHasPrefix(Action, 'list_')
-           Or ActionHasPrefix(Action, 'query')
-           Or ActionHasPrefix(Action, 'read_')
-           Or ActionHasPrefix(Action, 'find_')
-           Or ActionHasPrefix(Action, 'count')
-           Or ActionHasPrefix(Action, 'audit_')
-           Or ActionHasPrefix(Action, 'check_')
-           Or ActionHasPrefix(Action, 'calc_')
-           Or ActionHasPrefix(Action, 'export_')
-           Or ActionHasPrefix(Action, 'render_')
-           Or ActionHasPrefix(Action, 'probe_')
-           Or ActionHasPrefix(Action, 'inspect_')
-           Or ActionHasPrefix(Action, 'diff_')
-           Or ActionHasPrefix(Action, 'compare_')
-           Or (Action = 'ping');
+    Result := ActionHasPrefix(Verb, 'get_')
+           Or ActionHasPrefix(Verb, 'list_')
+           Or ActionHasPrefix(Verb, 'query')
+           Or ActionHasPrefix(Verb, 'read_')
+           Or ActionHasPrefix(Verb, 'find_')
+           Or ActionHasPrefix(Verb, 'count')
+           Or ActionHasPrefix(Verb, 'audit_')
+           Or ActionHasPrefix(Verb, 'check_')
+           Or ActionHasPrefix(Verb, 'calc_')
+           Or ActionHasPrefix(Verb, 'export_')
+           Or ActionHasPrefix(Verb, 'render_')
+           Or ActionHasPrefix(Verb, 'probe_')
+           Or ActionHasPrefix(Verb, 'inspect_')
+           Or ActionHasPrefix(Verb, 'diff_')
+           Or ActionHasPrefix(Verb, 'compare_')
+           Or (Verb = 'ping');
 End;
 
 function B64Decode(S : String) : String;
