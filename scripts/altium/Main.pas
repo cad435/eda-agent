@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.09.01.1';
+    SCRIPT_VERSION = '2026.09.01.3';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -42,9 +42,20 @@ Const
     SCHM_EndModify             = 3;
 
     // DelphiScript does NOT predefine Delphi's MaxInt (raises "Undeclared
-    // identifier" at runtime). Declare it explicitly. Used as a
+    // identifier" at runtime), so it is declared here. Used as a
     // "smallest seen so far" sentinel in board-statistics scans.
-    MAX_INT = 2147483647;
+    //
+    // NOT 2147483647. AD25 rejects that literal outright with "Invalid
+    // constant" while compiling the script, which stops the loop before
+    // it serves anything (issue #22, measured on AD25).
+    //
+    // 1e9 internal units is 100 inches, which is Altium's own maximum
+    // board dimension, so a coordinate could in principle equal it. That
+    // is acceptable here: the bounding-box scan carries its own Found
+    // flag as the real guard, and the dimension sentinels it initialises
+    // (track width, hole size, annular ring) are orders of magnitude
+    // below it.
+    MAX_INT = 1000000000;
 
 Var
     WorkspaceDir : String;

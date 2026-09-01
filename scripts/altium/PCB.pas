@@ -11972,9 +11972,9 @@ Begin
                                 Else If PointsNearC(Round(a2x), Round(a2y), Round(b2x), Round(b2y), TolC) Then
                                 Begin Sx := Round(a2x); Sy := Round(a2y); FarAx := Round(a1x); FarAy := Round(a1y); FarBx := Round(b1x); FarBy := Round(b1y); End
                                 Else
-                                    Sx := -2147483647;  { sentinel: no shared endpoint }
+                                    Sx := -MAX_INT;  { sentinel: no shared endpoint }
 
-                                If Sx <> -2147483647 Then
+                                If Sx <> -MAX_INT Then
                                 Begin
                                     { collinear continuation: far ends point opposite directions through S }
                                     sax := FarAx - Sx; say := FarAy - Sy;

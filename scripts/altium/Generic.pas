@@ -128,6 +128,39 @@ End;
 { for primitive returns.                                                      }
 {..............................................................................}
 
+{ Which schematic objects carry Text and Orientation.                          }
+{                                                                              }
+{ Neither lives on the base ISch_GraphicalObject, and reaching for one on a    }
+{ type that lacks it raises "Undeclared identifier". That is not catchable:    }
+{ the script engine surfaces it as a modal before any Try/Except runs, so the  }
+{ polling loop stops. Issue #22, reproduced with                              }
+{ obj_query(object_type='ePort', properties='...,Orientation') on AD25.       }
+{                                                                              }
+{ A DENYLIST, deliberately. The types below are the ones there is evidence     }
+{ for: PlaceAPort.pas in the scripting reference builds a Port from Name,      }
+{ Style, IOType, Alignment and Width and never touches Text or Orientation,    }
+{ and ReplaceSchObjects.pas reads a cross-sheet connector's Orientation in     }
+{ order to map it onto Port.Style. Enumerating every type that DOES have       }
+{ these would be guesswork and would silently break queries that work today.  }
+
+Function SchObjectHasText(Obj : ISch_GraphicalObject) : Boolean;
+Begin
+    Result := True;
+    If Obj = Nil Then Exit;
+    { Both of these name themselves with Name, not Text. }
+    If (Obj.ObjectId = ePort) Or (Obj.ObjectId = eSheetEntry) Then
+        Result := False;
+End;
+
+Function SchObjectHasOrientation(Obj : ISch_GraphicalObject) : Boolean;
+Begin
+    Result := True;
+    If Obj = Nil Then Exit;
+    { A Port carries its direction in Style, and a sheet entry in Side. }
+    If (Obj.ObjectId = ePort) Or (Obj.ObjectId = eSheetEntry) Then
+        Result := False;
+End;
+
 Function GetSchComponentSubText(Obj : ISch_GraphicalObject; PropName : String) : String;
 Var
     C : ISch_Component;
@@ -415,7 +448,18 @@ Begin
         End
 
         // String properties (late-bound across all types, primitives only)
-        Else If PropName = 'Text'        Then Result := Obj.Text
+        Else If PropName = 'Text'        Then
+        Begin
+            If SchObjectHasText(Obj) Then
+                Result := Obj.Text
+            Else
+            Begin
+                { Say it is not on this type rather than faulting. A Port
+                  and a sheet entry both answer to Name. }
+                NotePropertyDiag('unreadable', PropName);
+                Result := '';
+            End;
+        End
         Else If PropName = 'Name'        Then Result := Obj.Name
         Else If PropName = 'LibReference'       Then Result := Obj.LibReference
         Else If PropName = 'SourceLibraryName'  Then Result := Obj.SourceLibraryName
@@ -463,7 +507,16 @@ Begin
         Else If PropName = 'Comment.Text'    Then Result := GetSchComponentSubText(Obj, 'Comment')
 
         // Integer properties (returned as string)
-        Else If PropName = 'Orientation' Then Result := IntToStr(Obj.Orientation)
+        Else If PropName = 'Orientation' Then
+        Begin
+            If SchObjectHasOrientation(Obj) Then
+                Result := IntToStr(Obj.Orientation)
+            Else
+            Begin
+                NotePropertyDiag('unreadable', PropName);
+                Result := '';
+            End;
+        End
         Else If PropName = 'FontId'      Then Result := IntToStr(Obj.FontId)
         Else If PropName = 'LineWidth'   Then Result := IntToStr(Obj.LineWidth)
         Else If PropName = 'Style'       Then Result := IntToStr(Obj.Style)
@@ -501,6 +554,16 @@ Begin
         // 3=down(-y). Same convention as the pin dump in Proj_GetComponentInfo.
         Else If PropName = 'ConnectionX' Then
         Begin
+            { A connection point is a PIN idea, and Orientation is not on
+              every type. The Try below cannot save this: an undeclared
+              identifier is a modal, not an exception. Same fault as
+              issue #22, in code written to fix a different one. }
+            If Obj.ObjectId <> ePin Then
+            Begin
+                NotePropertyDiag('unreadable', PropName);
+                Result := '';
+                Exit;
+            End;
             POrient := 0; PLen := 0; PCoord := 0;
             Try POrient := Obj.Orientation; Except End;
             Try PLen := Obj.PinLength; Except End;
@@ -510,6 +573,12 @@ Begin
         End
         Else If PropName = 'ConnectionY' Then
         Begin
+            If Obj.ObjectId <> ePin Then
+            Begin
+                NotePropertyDiag('unreadable', PropName);
+                Result := '';
+                Exit;
+            End;
             POrient := 0; PLen := 0; PCoord := 0;
             Try POrient := Obj.Orientation; Except End;
             Try PLen := Obj.PinLength; Except End;
@@ -664,7 +733,13 @@ Begin
         End
 
         // String properties (late-bound across all types, primitives only)
-        Else If PropName = 'Text'        Then Obj.Text := Value
+        Else If PropName = 'Text'        Then
+        Begin
+            If SchObjectHasText(Obj) Then
+                Obj.Text := Value
+            Else
+                NotePropertyDiag('unknown', PropName);
+        End
         Else If PropName = 'Name'        Then Obj.Name := Value
         Else If PropName = 'LibReference'       Then Obj.LibReference := Value
         // SourceLibraryName is the design-cache field that records which
@@ -739,7 +814,13 @@ Begin
             SetSchComponentSubText(Obj, 'Comment', Value)
 
         // Integer properties
-        Else If PropName = 'Orientation' Then Obj.Orientation := StrToIntDef(Value, 0)
+        Else If PropName = 'Orientation' Then
+        Begin
+            If SchObjectHasOrientation(Obj) Then
+                Obj.Orientation := StrToIntDef(Value, 0)
+            Else
+                NotePropertyDiag('unknown', PropName);
+        End
         Else If PropName = 'FontId'      Then Obj.FontId := StrToIntDef(Value, 1)
         Else If PropName = 'LineWidth'   Then Obj.LineWidth := StrToIntDef(Value, 1)
         Else If PropName = 'Style'       Then Obj.Style := StrToIntDef(Value, 0)
@@ -2461,7 +2542,8 @@ Begin
     { API. The base ISch_GraphicalObject has no NetName property          }
     { (compile-time "Undeclared identifier: NetName"; Try/Except can't    }
     { rescue it). Instead, dispatch on ObjectId:                          }
-    {   - eNetLabel / ePowerObject / ePort , match against .Text         }
+    {   - eNetLabel / ePowerObject          , match against .Text        }
+    {   - ePort                              , match against .Name        }
     {   - eSheetEntry                       , match against .Name         }
     {   - eWire                             , wires don't store a net    }
     {     name as a primitive property; the net is derived at compile     }
@@ -2492,7 +2574,10 @@ Begin
                 While Obj <> Nil Do
                 Begin
                     ObjNet := '';
-                    If Obj.ObjectId = eSheetEntry Then
+                    { A Port names itself with Name too, and reading
+                      Text on one raises an undeclared identifier that no
+                      Try/Except can contain. Issue #22. }
+                    If Not SchObjectHasText(Obj) Then
                         Try ObjNet := Obj.Name; Except End
                     Else
                         Try ObjNet := Obj.Text; Except End;

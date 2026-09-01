@@ -1664,11 +1664,17 @@ End;
 
 Function RenderPropertyDiagJson(Dummy : Integer): String;
 Var
-    UJson, FJson, Remaining, Entry, Kind, Nm : String;
-    UCount, FCount, P : Integer;
+    UJson, FJson, RJson, Remaining, Entry, Kind, Nm : String;
+    UCount, FCount, RCount, P : Integer;
 Begin
     UJson := '['; UCount := 0;
     FJson := '['; FCount := 0;
+    { 'unreadable' was RECORDED AND THEN DROPPED. Only unknown and failed
+      were rendered, so a property that exists but cannot be read on this
+      object type came back as an empty string with nothing to say why.
+      That is the same blank-versus-unreadable confusion the sheet-symbol
+      text hit, and it hid the type refusals added for issue #22. }
+    RJson := '['; RCount := 0;
     Remaining := _PropertyDiagStr;
     While Length(Remaining) > 0 Do
     Begin
@@ -1698,14 +1704,23 @@ Begin
             If FCount > 0 Then FJson := FJson + ',';
             FJson := FJson + '"' + EscapeJsonString(Nm) + '"';
             Inc(FCount);
+        End
+        Else If Kind = 'unreadable' Then
+        Begin
+            If RCount > 0 Then RJson := RJson + ',';
+            RJson := RJson + '"' + EscapeJsonString(Nm) + '"';
+            Inc(RCount);
         End;
     End;
     UJson := UJson + ']';
     FJson := FJson + ']';
+    RJson := RJson + ']';
     Result := '{"unknown_count":' + IntToStr(UCount)
             + ',"unknown":' + UJson
             + ',"failed_count":' + IntToStr(FCount)
-            + ',"failed":' + FJson + '}';
+            + ',"failed":' + FJson
+            + ',"unreadable_count":' + IntToStr(RCount)
+            + ',"unreadable":' + RJson + '}';
 End;
 
 { The tail every modify reply carries, so what was WRITTEN is reported      }
