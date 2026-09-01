@@ -638,14 +638,39 @@ class AltiumBridge:
                         details={"dialogs": early,
                                  "blocked_after_seconds": round(waited, 1)},
                     )
-            if response_path.exists():
-                if first_appearance is None:
-                    first_appearance = time.monotonic() - start
-                    _trace_log(
-                        workspace_dir,
-                        f"POLL_SEEN id={request_id[:8]} "
-                        f"after={first_appearance*1000:.0f}ms polls={poll_count}",
-                    )
+            # DO NOT OPEN AN EMPTY RESPONSE. SaveToFile creates the file
+            # and then writes it, so polling on existence alone opened a
+            # 0-byte file, failed to parse, and came straight back to open
+            # it again. Every one of those opens is a handle Altium's
+            # exclusive create can collide with, and that collision
+            # surfaces as an EFCreateError modal that stalls the polling
+            # loop rather than an exception the script can catch.
+            # stat() takes no handle, so this costs nothing.
+            #
+            # first_appearance IS SET ON APPEARANCE, not on the first
+            # successful open. The deadline branch below treats a None
+            # first_appearance as "never seen it" and loops again, so
+            # tying it to a successful parse made a permanently empty
+            # response spin forever instead of timing out. That is the
+            # exact hazard the comment down there warns about, reached
+            # through the other branch.
+            appeared = response_path.exists()
+            if appeared and first_appearance is None:
+                first_appearance = time.monotonic() - start
+                _trace_log(
+                    workspace_dir,
+                    f"POLL_SEEN id={request_id[:8]} "
+                    f"after={first_appearance*1000:.0f}ms polls={poll_count}",
+                )
+
+            ready = False
+            if appeared:
+                try:
+                    ready = response_path.stat().st_size > 0
+                except OSError:
+                    ready = False
+
+            if ready:
                 try:
                     with open(response_path, "r", encoding="utf-8") as f:
                         data = json.load(f)

@@ -1325,7 +1325,7 @@ Var
     Doc : IDocument;
     SchDoc : ISch_Document;
     ServerDoc : IServerDocument;
-    I, TotalMatched, SheetsProcessed, SheetsSaved : Integer;
+    I, TotalMatched, SheetsProcessed, SheetsMarked : Integer;
     FilePath, JsonItems : String;
     IsMutating : Boolean;
 Begin
@@ -1348,7 +1348,7 @@ Begin
 
     TotalMatched := 0;
     SheetsProcessed := 0;
-    SheetsSaved := 0;
+    SheetsMarked := 0;
     JsonItems := '';
     IsMutating := (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create');
 
@@ -1378,10 +1378,13 @@ Begin
         If IsMutating Then
         Begin
             Try SchDoc.GraphicallyInvalidate; Except End;
-            // SaveDocByPath does SetModified + DoFileSave, which writes
-            // directly to disk and bypasses SaveAll's non-active-doc blind spot.
-            SaveDocByPath(FilePath);
-            Inc(SheetsSaved);
+            // MARKS THE DOCUMENT, it does not write. The flush is
+            // app_save_all. This comment used to say the procedure did
+            // SetModified + DoFileSave and wrote straight to disk, which
+            // was never true and is how three tool docstrings came to
+            // promise a save that never happened.
+            MarkDocDirtyByPath(FilePath);
+            Inc(SheetsMarked);
         End;
 
         Inc(SheetsProcessed);
@@ -1397,7 +1400,10 @@ Begin
         Result := BuildSuccessResponse(RequestId,
             '{"matched":' + IntToStr(TotalMatched) +
             ',"sheets_processed":' + IntToStr(SheetsProcessed) +
-            ',"sheets_saved":' + IntToStr(SheetsSaved)
+            { Named for what it counts. It was "sheets_saved", and the
+              documents were only marked dirty; app_save_all is what
+              writes them. }
+            ',"sheets_marked":' + IntToStr(SheetsMarked)
             + ModifyOutcomeJson(0) + '}');
 End;
 
@@ -1432,7 +1438,7 @@ Begin
     If IsMutating Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
-        SaveDocByPath(DocPath);
+        MarkDocDirtyByPath(DocPath);
         Saved := True;
     End;
 
@@ -1489,7 +1495,7 @@ Begin
     If IsMutating Then
     Begin
         Try SchDoc.GraphicallyInvalidate; Except End;
-        SaveDocByPath(DocPath);
+        MarkDocDirtyByPath(DocPath);
         Saved := True;
     End;
 

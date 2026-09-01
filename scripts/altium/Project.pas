@@ -1778,7 +1778,7 @@ Begin
                 End;
                 SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
                 SchDoc.GraphicallyInvalidate;
-                SaveDocByPath(FilePath);
+                MarkDocDirtyByPath(FilePath);
                 Continue;
             End;
 
@@ -1918,7 +1918,7 @@ Begin
                 Try SchServer.ProcessControl.PostProcess(SchDoc, 'Edit'); Except End;
                 Try SchDoc.GraphicallyInvalidate; Except End;
             End;
-            Try SaveDocByPath(TouchedDocs[I]); Except End;
+            Try MarkDocDirtyByPath(TouchedDocs[I]); Except End;
         End;
 
         { No CompList.Free -- releasing a TInterfaceList of live schematic
@@ -3588,10 +3588,10 @@ Begin
         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
     End;
 
-    { Persist directly to disk via the IServerDocument API. SaveDocByPath
+    { Persist directly to disk via the IServerDocument API. MarkDocDirtyByPath
       does SetModified + DoFileSave. WorkspaceManager:SaveAll doesn't
       reach non-active sheets in our tests, so we don't rely on it. }
-    SaveDocByPath(FilePath);
+    MarkDocDirtyByPath(FilePath);
     Try SchDoc.GraphicallyInvalidate; Except End;
 
     If Found Then Action := 'updated' Else Action := 'added';
@@ -4530,7 +4530,7 @@ Begin
                     Finally
                         SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
                     End;
-                    Try SaveDocByPath(FullPath); Except End;
+                    Try MarkDocDirtyByPath(FullPath); Except End;
                     Try SchDoc.GraphicallyInvalidate; Except End;
                     Inc(SheetsUpdated);
                 End;

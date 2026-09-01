@@ -1115,7 +1115,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create pad');
 
     PCBServer.PostProcess;
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 End;
 
 { Batch pad authoring: same shape as Lib_AddPins but for PCB pads. Receives a }
@@ -1242,7 +1242,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
@@ -1324,7 +1324,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create track');
 
     PCBServer.PostProcess;
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 End;
 
 { Batch track authoring: same shape as Lib_AddFootprintPads. A `tracks` array }
@@ -1428,7 +1428,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"added":' + IntToStr(Added) + ',"failed":' + IntToStr(Failed)
@@ -1519,7 +1519,7 @@ Begin
         Result := BuildErrorResponse(RequestId, 'CREATE_FAILED', 'Failed to create arc');
 
     PCBServer.PostProcess;
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 End;
 
 { Lib_AddFootprintText - Stamp a text primitive onto a PcbLib footprint.       }
@@ -3717,7 +3717,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 End;
 
 Function Lib_GetComponents(Params : String; RequestId : String) : String;
@@ -7655,11 +7655,19 @@ Begin
     Try PcbLib.RemoveComponent(Target); Except End;
     Try PcbLib.DeRegisterComponent(Target); Except End;
     PCBServer.PostProcess;
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 
+    { SAY THAT THE WRITE IS DEFERRED. The footprint is gone from the
+      in-memory library and the file on disk still contains it until a
+      flush. Reported by a user who read success, reloaded, and found the
+      footprint still there with an unchanged timestamp. The docstring is
+      not enough: the reply is what a caller reads. }
     RespJson :=
         '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"' +
-        ',"deleted":"' + EscapeJsonString(FpWanted) + '"}';
+        ',"deleted":"' + EscapeJsonString(FpWanted) + '"' +
+        ',"written_to_disk":false,"pending_save":true' +
+        ',"note":"removed in memory and the library marked dirty. The file '
+        + 'still contains it until app_save_all or proj_save flushes."}';
     Result := BuildSuccessResponse(RequestId, RespJson);
 End;
 
@@ -7831,7 +7839,7 @@ Begin
     PCBServer.PostProcess;
     Try PcbLib.Board.ViewManager_FullUpdate; Except End;
     Try PcbLib.RefreshView; Except End;
-    SaveDocByPath(PcbLib.Board.FileName);
+    MarkDocDirtyByPath(PcbLib.Board.FileName);
 
     RespJson := '{"success":true,"library_path":"' + EscapeJsonString(LibPath) + '"'
         + ',"footprint":"' + EscapeJsonString(FpName) + '"'
@@ -8648,8 +8656,8 @@ Begin
 
     Try DestLib.Board.ViewManager_FullUpdate; Except End;
     Try DestLib.RefreshView; Except End;
-    SaveDocByPath(DestLib.Board.FileName);
-    If DeleteFromSource Then SaveDocByPath(SourceLib.Board.FileName);
+    MarkDocDirtyByPath(DestLib.Board.FileName);
+    If DeleteFromSource Then MarkDocDirtyByPath(SourceLib.Board.FileName);
 
     RespJson := '{"success":true'
         + ',"source_library":"' + EscapeJsonString(SourcePath) + '"'
@@ -8769,7 +8777,7 @@ Begin
 
     Try DestLib.Board.ViewManager_FullUpdate; Except End;
     Try DestLib.RefreshView; Except End;
-    SaveDocByPath(DestLib.Board.FileName);
+    MarkDocDirtyByPath(DestLib.Board.FileName);
 
     RespJson := '{"success":true'
         + ',"source_library":"' + EscapeJsonString(SourceLibPath) + '"'
@@ -9872,7 +9880,7 @@ Begin
     End;
 
     Try Board.ViewManager_FullUpdate; Except End;
-    SaveDocByPath(Where);
+    MarkDocDirtyByPath(Where);
 
     Result := BuildSuccessResponse(RequestId,
         '{"document":"' + EscapeJsonString(Where) + '",'
@@ -10164,7 +10172,7 @@ Begin
     If Removed > 0 Then
     Begin
         Try PcbLib.Board.ViewManager_FullUpdate; Except End;
-        SaveDocByPath(LibPath);
+        MarkDocDirtyByPath(LibPath);
     End;
 
     Result := BuildSuccessResponse(RequestId,

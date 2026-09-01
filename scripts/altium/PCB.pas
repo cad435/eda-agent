@@ -252,7 +252,7 @@ Begin
     Targets.Free;
     ToDelete.Free;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"deleted":' + IntToStr(DeletedCount)
@@ -400,7 +400,7 @@ Begin
         End;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"class_name":"' + EscapeJsonString(ClassName) + '",'
         + '"class_created":' + BoolToJsonStr(Not ClassExists) + ','
@@ -978,7 +978,7 @@ Begin
         End;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     { When a gap was asked for, say what became of it. A bare count is
       what let a refused constraint write read as a success: the number
@@ -1545,7 +1545,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"designator":"' + EscapeJsonString(DesStr) + '",'
@@ -2082,7 +2082,7 @@ Begin
                 + 'shared with the rest of the board, so nothing was copied. '
                 + 'Pass an explicit "nets" list to force specific nets. ';
 
-        SaveDocByPath(Board.FileName);
+        MarkDocDirtyByPath(Board.FileName);
 
         Result := BuildSuccessResponse(RequestId,
             JsonObj(
@@ -2473,7 +2473,7 @@ Begin
         End;
         MapJson := MapJson + ']';
 
-        Try SaveDocByPath(PcbLib.Board.FileName); Except End;
+        Try MarkDocDirtyByPath(PcbLib.Board.FileName); Except End;
 
         Result := BuildSuccessResponse(RequestId,
             JsonObj(
@@ -3385,7 +3385,7 @@ Begin
         Applied := Applied + 1;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"moves_applied":' + IntToStr(Applied) + ','
@@ -3629,7 +3629,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"layer":"' + EscapeJsonString(GetLayerString(TargetLayer)) + '"}');
 End;
@@ -3693,7 +3693,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"layer":"' + EscapeJsonString(GetLayerString(TargetLayer)) + '"}');
 End;
@@ -3926,7 +3926,7 @@ Begin
     { Only persist a change that actually took. Saving a board whose write was }
     { refused writes the unchanged stackup back over itself, and the fresh     }
     { file timestamp then reads as a completed edit.                           }
-    If AllOk Then SaveDocByPath(Board.FileName);
+    If AllOk Then MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":' + BoolToJsonStr(AllOk) + ','
@@ -4061,7 +4061,7 @@ Begin
 
     If Applied Then
     Begin
-        SaveDocByPath(Board.FileName);
+        MarkDocDirtyByPath(Board.FileName);
         NoteStr := '';
     End
     Else
@@ -4675,7 +4675,7 @@ Begin
         ReadBackY := CoordToMils(Body.y);
     Except End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     { The one thing a caller cannot check from here. }
     NoteNextStep('Look at it before trusting the placement: obj_switch_view '
@@ -4791,7 +4791,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -4886,7 +4886,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -5047,7 +5047,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(Placed) + ','
@@ -5133,7 +5133,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -5226,7 +5226,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -5319,7 +5319,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -5527,7 +5527,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"created":true,'
@@ -5597,7 +5597,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"deleted":true,"name":"' + EscapeJsonString(RuleName) + '"}');
@@ -5730,7 +5730,7 @@ Begin
     End;
 
     Try NewLayer := GetLayerString(Comp.Layer); Except NewLayer := 'Unknown'; End;
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"designator":"' + EscapeJsonString(DesStr) + '",'
@@ -5857,7 +5857,7 @@ Begin
             PCBServer.PostProcess;
         End;
 
-        SaveDocByPath(Board.FileName);
+        MarkDocDirtyByPath(Board.FileName);
 
         Result := BuildSuccessResponse(RequestId,
             '{"aligned":true,'
@@ -6001,7 +6001,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"designator":"' + EscapeJsonString(DesStr) + '",'
@@ -6273,7 +6273,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"deleted":true,'
@@ -6487,7 +6487,7 @@ Begin
       FFFFFFFF). PCB_Scale / CollectSelectedPCBPrims leave the list to the
       script host for the same reason. }
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"modified":true,'
@@ -6909,7 +6909,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     { The pour options and the hatch style decide what the NEXT pour does, }
     { so the copper is unchanged until this runs. Reported from a live     }
@@ -7111,7 +7111,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"created":true,'
@@ -7353,7 +7353,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,'
@@ -7462,7 +7462,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -7563,7 +7563,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(PlacedCount) + ','
@@ -7638,7 +7638,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"created":true,"name":"' + EscapeJsonString(DPName) + '",'
@@ -7728,7 +7728,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -7851,7 +7851,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"distributed":' + IntToStr(Count) + ','
@@ -7945,7 +7945,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,'
@@ -8032,7 +8032,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,"x":' + IntToStr(X) + ',"y":' + IntToStr(Y) + ','
@@ -8181,7 +8181,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,"footprint":"' + EscapeJsonString(Footprint) + '",'
@@ -8361,7 +8361,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(PlacedCount)
@@ -8454,7 +8454,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,"kind":"angular","center_x":' + IntToStr(Cx)
@@ -8518,7 +8518,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"placed":true,"kind":"radial","center_x":' + IntToStr(Cx)
@@ -8604,7 +8604,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"child_path":"' + EscapeJsonString(ChildPath) + '",'
@@ -8828,7 +8828,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    If Placed > 0 Then SaveDocByPath(Board.FileName);
+    If Placed > 0 Then MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
@@ -9056,7 +9056,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
@@ -9444,7 +9444,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    If Cleared > 0 Then SaveDocByPath(Board.FileName);
+    If Cleared > 0 Then MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         JsonObj(
@@ -10145,7 +10145,7 @@ Begin
     If SaveNeeded Then
     Begin
         Try Board.GraphicallyInvalidate; Except End;
-        Try SaveDocByPath(Board.FileName); Except End;
+        Try MarkDocDirtyByPath(Board.FileName); Except End;
     End;
 
     Result := BuildSuccessResponse(RequestId,
@@ -10557,7 +10557,7 @@ Begin
     If PartnerLayer <> eNoLayer Then
         PartnerJson := '"' + EscapeJsonString(GetLayerString(PartnerLayer)) + '"';
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"success":true,"layer":"' + EscapeJsonString(GetLayerString(TargetLayer)) + '",'
         + '"kind":"' + EscapeJsonString(MechKindToString(KindId)) + '",'
@@ -10957,7 +10957,7 @@ Begin
         Applied := Applied + 1;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"applied":' + IntToStr(Applied) + ',"failed":' + IntToStr(Failed) + ','
         + '"unknown_layers":"' + EscapeJsonString(BadLayers) + '"}');
@@ -11057,7 +11057,7 @@ Begin
         Try PCBServer.SystemOptions.DoOnlineDRC := True; Except End;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(Placed) + ',"skipped":' + IntToStr(Skipped)
         + ',"total":' + IntToStr(Total) + '}');
@@ -11171,7 +11171,7 @@ Begin
     ResetParameters;
     RunProcess('PCB:UpdateConnectivity');
     AfterLen := CoordToMils(Net.RoutedLength);
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"net":"' + EscapeJsonString(NetName) + '",'
@@ -11289,7 +11289,7 @@ Begin
     AddStringParameter('Mode', 'BOARDOUTLINE_FROM_SEL_PRIMS');
     RunProcess('PCB:PlaceBoardOutline');
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"child_path":"' + EscapeJsonString(ChildPath) + '",'
         + '"rows":' + IntToStr(Rows) + ',"cols":' + IntToStr(Cols) + ','
@@ -11380,7 +11380,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"removed":' + IntToStr(Removed) + '}');
 End;
@@ -11547,7 +11547,7 @@ Begin
     AddStringParameter('Mode', 'BOARDOUTLINE_FROM_SEL_PRIMS');
     RunProcess('PCB:PlaceBoardOutline');
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"width_mils":' + IntToStr(CoordToMils(MaxX - MinX))
         + ',"height_mils":' + IntToStr(CoordToMils(MaxY - MinY)) + '}');
@@ -11625,7 +11625,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"checked":' + IntToStr(Checked) + ',"changed":' + IntToStr(Changed) + '}');
 End;
@@ -11693,7 +11693,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"copied":' + IntToStr(Copied) + ',"layer":"'
         + EscapeJsonString(GetLayerString(MechL)) + '"}');
@@ -11808,7 +11808,7 @@ Begin
     Finally
         PCBServer.PostProcess;
     End;
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"moved_end":' + IntToStr(MoveEnd)
@@ -12049,7 +12049,7 @@ Begin
         End;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"slivers_deleted":' + IntToStr(SliverDeleted)
         + ',"merged":' + IntToStr(Merged)
@@ -12161,7 +12161,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"placed":' + IntToStr(Placed) + ',"scanned":' + IntToStr(Scanned)
         + ',"layer":"' + EscapeJsonString(GetLayerString(Lyr)) + '"}');
@@ -12279,7 +12279,7 @@ Begin
         PCBServer.PostProcess;
     End;
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
     Result := BuildSuccessResponse(RequestId,
         '{"net":"' + EscapeJsonString(NetStr) + '","target_layer":"'
         + EscapeJsonString(GetLayerString(TargetLayer)) + '","moved":'
@@ -12418,7 +12418,7 @@ Begin
 
     ResetParameters;
     RunProcess('PCB:RepourAllPolygons');
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"beveled":true,"index":' + IntToStr(Idx)
@@ -12520,7 +12520,7 @@ Begin
     End;
 
     Existing.Free;
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"created":' + IntToStr(CreatedCount)
@@ -12735,7 +12735,7 @@ Begin
     { No NetRefs.Free -- releasing a TInterfaceList of board interface refs   }
     { faults in oleaut32; leave it to the script host.                        }
 
-    SaveDocByPath(Board.FileName);
+    MarkDocDirtyByPath(Board.FileName);
 
     Result := BuildSuccessResponse(RequestId,
         '{"bound":' + IntToStr(Bound)

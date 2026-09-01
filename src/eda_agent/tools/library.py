@@ -3783,9 +3783,14 @@ def register_library_tools(mcp):
     ) -> dict[str, Any]:
         """Delete one footprint from a PCB library (.PcbLib).
 
-        Finds the footprint by name, removes and deregisters it, then saves
-        the .PcbLib. Deletes a single named footprint; if the name is not
-        found the call errors (FOOTPRINT_NOT_FOUND). No wildcard mass-delete.
+        Finds the footprint by name, removes and deregisters it, and MARKS
+        the .PcbLib dirty. It does NOT write to disk: this bridge defers
+        saves, and `app_save_all` (or `proj_save` on the LibPkg) is what
+        flushes them. Reported: this said it saved, the footprint was still
+        in the file and the timestamp unchanged until an explicit save.
+
+        Deletes a single named footprint; if the name is not found the call
+        errors (FOOTPRINT_NOT_FOUND). No wildcard mass-delete.
 
         Args:
             footprint_name: the footprint's name in the library.
@@ -3927,7 +3932,10 @@ def register_library_tools(mcp):
 
         Renames the footprint whose name is footprint_name to new_name.
         Errors if footprint_name is not found or new_name already exists in
-        the library. Saves the .PcbLib.
+        the library.
+
+        MARKS the .PcbLib dirty; it does not write. Call `app_save_all` to
+        flush, and check what it reports actually reached disk.
 
         Args:
             footprint_name: the current footprint name.

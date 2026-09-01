@@ -755,7 +755,7 @@ Begin
     If (Mode = 'modify') Or (Mode = 'delete') Or (Mode = 'create') Then
     Begin
         Board.GraphicalView_ZoomRedraw;
-        SaveDocByPath(Board.FileName);
+        MarkDocDirtyByPath(Board.FileName);
     End;
 
     If Mode = 'query' Then

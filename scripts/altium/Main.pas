@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.08.31.3';
+    SCRIPT_VERSION = '2026.09.01.1';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -360,10 +360,16 @@ Begin
 End;
 
 {..............................................................................}
-{ Persist a specific document by path (deferred save: mark dirty only).        }
+{ Mark one document dirty by path. IT DOES NOT WRITE.                          }
+{                                                                              }
+{ Deferred save is deliberate: marking is cheap, and app_save_all flushes at   }
+{ a checkpoint. The hazard is the NAME. Called SaveDocByPath it produced a     }
+{ comment in Generic.pas claiming it wrote to disk, and three tool docstrings  }
+{ promising the caller a save. A caller who needs bytes on disk must call      }
+{ app_save_all or proj_save.                                                   }
 {..............................................................................}
 
-Procedure SaveDocByPath(FilePath : String);
+Procedure MarkDocDirtyByPath(FilePath : String);
 Var
     ServerDoc : IServerDocument;
 Begin
@@ -1018,6 +1024,37 @@ Begin
     { is transient (Defender scan, or Python reading the response mid-write),  }
     { so retry briefly. Mirrors ReadFileContent and the proven sibling-MCP     }
     { idiom (OutputLines.Text := json; SaveToFile).                           }
+    { CLEAR THE DESTINATION FIRST, with calls that cannot raise.
+
+      MEASURED: EFCreateError, "Cannot create file ... because it is
+      being used by another process", arrived as a modal and stalled the
+      polling loop. The retry below cannot help with that, because the
+      engine surfaces the exception before the surrounding Try/Except
+      runs, so the first failure is already a modal. Same behaviour that
+      defeated Try/Except around StrToFloat, same answer: stop the
+      exception happening rather than trying to catch it.
+
+      FileExists and DeleteFile return Booleans and do not raise, so this
+      loop is safe no matter who holds the file. Only once the name is
+      free is the raising create attempted.
+
+      tmp + RenameFile would be the tidier fix and is ruled out: the
+      sibling implementation in reference/CoAltium records that
+      DelphiScript's RenameFile silently failed for some paths and the
+      response never reached its final filename.
+
+      This does not make a create infallible. A fresh name can still be
+      grabbed between the check and the create, by a virus scanner most
+      likely. It removes the reported case, which is a create against a
+      name that is already there and already held. }
+    Attempt := 0;
+    While (Attempt < 40) And FileExists(FilePath) Do
+    Begin
+        Inc(Attempt);
+        DeleteFile(FilePath);
+        If FileExists(FilePath) Then Sleep(15);
+    End;
+
     Attempt := 0;
     While Attempt < 12 Do
     Begin
@@ -1036,6 +1073,9 @@ Begin
             SL.Free;
         End;
         If Ok Then Exit;
+        { The destination may have reappeared, so clear it again before
+          the next create rather than repeating the failing call. }
+        If FileExists(FilePath) Then DeleteFile(FilePath);
         Sleep(15);
     End;
 End;
