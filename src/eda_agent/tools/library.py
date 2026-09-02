@@ -3602,6 +3602,73 @@ def register_library_tools(mcp):
         )
 
     @mcp.tool()
+    async def lib_list_vault_libraries() -> dict[str, Any]:
+        """List every available library, file-based AND managed (Workspace).
+
+        Read this BEFORE the managed tools when you do not already know the
+        Workspace name. A managed component is not addressed by a file path
+        but by (Workspace name, Design Item ID), and the Workspace name is
+        the ``identifier`` of the entry whose ``is_vault`` is true.
+
+        The managed tools resolve the Workspace themselves while exactly one
+        is connected, so this is only needed when several are, or when a
+        managed call answers VAULT_NOT_RESOLVED.
+
+        Returns:
+            {"total": int, "vault_count": int, "libraries": [
+                {"index": int, "identifier": "...", "source": int,
+                 "is_vault": bool}, ...],
+             "diag": "..."}
+            ``source`` is Altium's TLibrarySource: 1 file, 2 managed, -1 not
+            readable -- and -1 means ``is_vault`` is NOT trustworthy, which
+            ``diag`` then states.
+        """
+        bridge = get_bridge()
+        return await bridge.send_command_async("library.list_vault_libraries", {})
+
+    @mcp.tool()
+    async def lib_get_vault_component(
+        design_item_id: str,
+        vault: str = "",
+    ) -> dict[str, Any]:
+        """Resolve ONE managed (Workspace/Vault) component by Design Item ID.
+
+        The dry run for ``sch_place_vault_components``: whether the item
+        exists in the connected Workspace, which symbol it resolves to, its
+        lifecycle state, its revisions, and the parameters a placement would
+        stamp onto the component. Read-only and non-modal (the object
+        model's Browse* siblings of these calls open a dialog and would
+        block the bridge, so they are not used).
+
+        A VPN -- or any other parameter value -- is NOT resolved to a Design
+        Item ID here. The managed API offers no reverse lookup from a
+        parameter to an item, so that mapping belongs outside this server
+        (ERP export, the Nexar/GraphQL side). Pass the Design Item ID.
+
+        Args:
+            design_item_id: the managed component's Design Item ID.
+            vault: Workspace name. Omit while exactly one Workspace is
+                connected; on VAULT_NOT_RESOLVED take it from
+                ``lib_list_vault_libraries``.
+
+        Returns:
+            {"design_item_id", "vault", "found_symbol": bool,
+             "symbol_reference", "symbol_library_path",
+             "component_library_path", "display_path", "lifecycle_state",
+             "has_revisions": bool, "revisions", "placement_parameters",
+             "diag"}
+            ``diag`` names every object-model call that was not available,
+            so an empty field can be told apart from a missing method.
+        """
+        bridge = get_bridge()
+        params: dict[str, Any] = {"design_item_id": design_item_id}
+        if vault:
+            params["vault"] = vault
+        return await bridge.send_command_async(
+            "library.get_vault_component", params
+        )
+
+    @mcp.tool()
     async def lib_uninstall_library(library_path: str) -> dict[str, Any]:
         """Unregister a library from the environment's Available Libraries.
 

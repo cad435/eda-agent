@@ -7366,6 +7366,261 @@ Begin
         + EscapeJsonString(Path) + '"}');
 End;
 
+{..............................................................................}
+{ Managed (Workspace / Vault) content.                                         }
+{                                                                              }
+{ A managed component is not a file. It is addressed by the triple             }
+{ (LibIdentifierKind, LibraryIdentifier, DesignItemID), with the kind set to   }
+{ LIB_IDENT_KIND_VAULT_NAME and the identifier set to the connected            }
+{ Workspace's name. IntegratedLibraryManager answers for both worlds: its      }
+{ available-library list tags every entry with a TLibrarySource, and that tag  }
+{ is what tells the managed entries apart from the file libraries.             }
+{                                                                              }
+{ Every call into the managed side sits in its OWN inner Try. In this host a   }
+{ method the object model does not have is a RUNTIME error, not a compile      }
+{ error, so one unguarded probe would take the whole handler down and return a }
+{ plausible-looking empty answer. What was reached and what was not is         }
+{ reported in "diag" instead, so a failure names the call that failed.         }
+{                                                                              }
+{ Resolving a VPN (or any other parameter) to a Design Item ID is deliberately }
+{ NOT done here. These handlers take the ID as given.                          }
+{..............................................................................}
+
+{ ResolveVaultLibrary - decide which managed library to address.               }
+{                                                                              }
+{ An explicit name from the caller wins and is taken as given. With none, the  }
+{ available list is scanned and a SINGLE vault entry is accepted; zero or      }
+{ several is an error rather than a guess, because placing out of the wrong    }
+{ Workspace yields components linked to the wrong library, which looks correct }
+{ on the sheet and is wrong in the BOM.                                        }
+Function ResolveVaultLibrary(Requested : String; Var Identifier : String;
+    Var VaultCount : Integer; Var Diag : String) : Boolean;
+Var
+    I, Total, Kind : Integer;
+    Path : String;
+    TypeFailed : Boolean;
+Begin
+    Result := False;
+    Identifier := '';
+    VaultCount := 0;
+    Total := 0;
+    TypeFailed := False;
+
+    If Trim(Requested) <> '' Then
+    Begin
+        Identifier := Trim(Requested);
+        VaultCount := 1;
+        Result := True;
+        Exit;
+    End;
+
+    If IntegratedLibraryManager = Nil Then
+    Begin
+        Diag := Diag + 'IntegratedLibraryManager unavailable;';
+        Exit;
+    End;
+
+    Try
+        Total := IntegratedLibraryManager.AvailableLibraryCount;
+    Except
+        Diag := Diag + 'AvailableLibraryCount not callable;';
+        Exit;
+    End;
+
+    For I := 0 To Total - 1 Do
+    Begin
+        Path := '';
+        Kind := -1;
+        Try Path := IntegratedLibraryManager.AvailableLibraryPath(I); Except End;
+        Try Kind := IntegratedLibraryManager.AvailableLibraryType(I); Except TypeFailed := True; End;
+        If (Kind = LIB_SRC_VAULT) And (Path <> '') Then
+        Begin
+            Inc(VaultCount);
+            If Identifier = '' Then Identifier := Path;
+        End;
+    End;
+
+    If TypeFailed Then
+        Diag := Diag + 'AvailableLibraryType not callable, no entry could be '
+            + 'classified as managed;';
+
+    Result := (VaultCount = 1) And (Identifier <> '');
+End;
+
+{..............................................................................}
+{ Lib_ListVaultLibraries - what the environment offers, file and managed.      }
+{ Reports every available library with its TLibrarySource so the caller can    }
+{ name a Workspace for the managed handlers below. Read-only.                  }
+{..............................................................................}
+Function Lib_ListVaultLibraries(Params : String; RequestId : String) : String;
+Var
+    I, Total, Kind, VaultCount : Integer;
+    Path, ItemsJson, Diag : String;
+    TypeFailed : Boolean;
+Begin
+    If IntegratedLibraryManager = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_MANAGER',
+            'IntegratedLibraryManager unavailable');
+        Exit;
+    End;
+
+    Total := -1;
+    Diag := '';
+    Try
+        Total := IntegratedLibraryManager.AvailableLibraryCount;
+    Except End;
+    If Total < 0 Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'ENUM_FAILED',
+            'IntegratedLibraryManager.AvailableLibraryCount is not callable in '
+            + 'this host, the available-library list cannot be read');
+        Exit;
+    End;
+
+    ItemsJson := '';
+    VaultCount := 0;
+    TypeFailed := False;
+    For I := 0 To Total - 1 Do
+    Begin
+        Path := '';
+        Kind := -1;
+        Try Path := IntegratedLibraryManager.AvailableLibraryPath(I); Except End;
+        Try Kind := IntegratedLibraryManager.AvailableLibraryType(I); Except TypeFailed := True; End;
+        If Kind = LIB_SRC_VAULT Then Inc(VaultCount);
+        If ItemsJson <> '' Then ItemsJson := ItemsJson + ',';
+        ItemsJson := ItemsJson + '{"index":' + IntToStr(I)
+            + ',"identifier":"' + EscapeJsonString(Path) + '"'
+            + ',"source":' + IntToStr(Kind)
+            + ',"is_vault":' + BoolToJsonStr(Kind = LIB_SRC_VAULT) + '}';
+    End;
+
+    If TypeFailed Then
+        Diag := Diag + 'AvailableLibraryType not callable, source reported as -1 '
+            + 'and is_vault is therefore not trustworthy;';
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"total":' + IntToStr(Total)
+        + ',"vault_count":' + IntToStr(VaultCount)
+        + ',"libraries":[' + ItemsJson + ']'
+        + ',"diag":"' + EscapeJsonString(Diag) + '"}');
+End;
+
+{..............................................................................}
+{ Lib_GetVaultComponent - resolve ONE managed component by Design Item ID.     }
+{                                                                              }
+{ Answers what a placement needs to know before it commits: does the item      }
+{ exist, which symbol does it resolve to, which lifecycle state is it in,      }
+{ which revisions exist, and what parameters would be stamped onto the placed  }
+{ component. Read-only, and every call is non-modal: the Browse* siblings of   }
+{ these methods open a dialog and would block the polling loop, so they are    }
+{ not used.                                                                    }
+{ Params: design_item_id (required), vault (optional).                         }
+{..............................................................................}
+Function Lib_GetVaultComponent(Params : String; RequestId : String) : String;
+Var
+    DesignItemId, VaultName, Diag : String;
+    SymbolRef, SymbolLibPath, CompLibPath, DisplayPath : String;
+    LifeCycle, RevList, PlaceParams : String;
+    VaultCount : Integer;
+    FoundSymbol, GotRevs : Boolean;
+Begin
+    DesignItemId := Trim(ExtractJsonValue(Params, 'design_item_id'));
+    If DesignItemId = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM',
+            'design_item_id is required');
+        Exit;
+    End;
+
+    If IntegratedLibraryManager = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_MANAGER',
+            'IntegratedLibraryManager unavailable');
+        Exit;
+    End;
+
+    Diag := '';
+    VaultName := '';
+    VaultCount := 0;
+    If Not ResolveVaultLibrary(ExtractJsonValue(Params, 'vault'), VaultName,
+        VaultCount, Diag) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'VAULT_NOT_RESOLVED',
+            'no single managed library to address (classified ' + IntToStr(VaultCount)
+            + '); pass vault=<Workspace name> from lib_list_vault_libraries. '
+            + Diag);
+        Exit;
+    End;
+
+    SymbolRef := '';
+    SymbolLibPath := '';
+    CompLibPath := '';
+    DisplayPath := '';
+    LifeCycle := '';
+    RevList := '';
+    PlaceParams := '';
+    FoundSymbol := False;
+    GotRevs := False;
+
+    Try
+        FoundSymbol := IntegratedLibraryManager.FindComponentSymbol(
+            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId,
+            SymbolLibPath, SymbolRef);
+    Except
+        Diag := Diag + 'FindComponentSymbol not callable;';
+    End;
+
+    Try
+        CompLibPath := IntegratedLibraryManager.FindComponentLibraryPath(
+            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+    Except
+        Diag := Diag + 'FindComponentLibraryPath not callable;';
+    End;
+
+    Try
+        DisplayPath := IntegratedLibraryManager.FindComponentDisplayPath(
+            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+    Except
+        Diag := Diag + 'FindComponentDisplayPath not callable;';
+    End;
+
+    Try
+        LifeCycle := IntegratedLibraryManager.GetLifeCycleState(
+            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+    Except
+        Diag := Diag + 'GetLifeCycleState not callable;';
+    End;
+
+    Try
+        GotRevs := IntegratedLibraryManager.GetOrderedRevisionList(
+            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId, RevList);
+    Except
+        Diag := Diag + 'GetOrderedRevisionList not callable;';
+    End;
+
+    Try
+        PlaceParams := IntegratedLibraryManager.GetComponentPlacementParameters(
+            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+    Except
+        Diag := Diag + 'GetComponentPlacementParameters not callable;';
+    End;
+
+    Result := BuildSuccessResponse(RequestId,
+        '{"design_item_id":"' + EscapeJsonString(DesignItemId) + '"'
+        + ',"vault":"' + EscapeJsonString(VaultName) + '"'
+        + ',"found_symbol":' + BoolToJsonStr(FoundSymbol)
+        + ',"symbol_reference":"' + EscapeJsonString(SymbolRef) + '"'
+        + ',"symbol_library_path":"' + EscapeJsonString(SymbolLibPath) + '"'
+        + ',"component_library_path":"' + EscapeJsonString(CompLibPath) + '"'
+        + ',"display_path":"' + EscapeJsonString(DisplayPath) + '"'
+        + ',"lifecycle_state":"' + EscapeJsonString(LifeCycle) + '"'
+        + ',"has_revisions":' + BoolToJsonStr(GotRevs)
+        + ',"revisions":"' + EscapeJsonString(RevList) + '"'
+        + ',"placement_parameters":"' + EscapeJsonString(PlaceParams) + '"'
+        + ',"diag":"' + EscapeJsonString(Diag) + '"}');
+End;
+
 { Lib_DeleteComponent - remove one symbol from a schematic library (.SchLib).  }
 { Mirrors the overwrite path in Lib_CopyComponent: focus the lib, resolve the  }
 { component by LibReference, RemoveSchComponent, then mark the lib dirty for    }
@@ -10506,6 +10761,8 @@ Begin
         'split_pin_functions':  Result := Lib_SplitPinFunctions(Params, RequestId);
         'install_library':      Result := Lib_InstallLibrary(Params, RequestId);
         'uninstall_library':    Result := Lib_UninstallLibrary(Params, RequestId);
+        'list_vault_libraries': Result := Lib_ListVaultLibraries(Params, RequestId);
+        'get_vault_component':  Result := Lib_GetVaultComponent(Params, RequestId);
         'delete_component':     Result := Lib_DeleteComponent(Params, RequestId);
         'rename_component':     Result := Lib_RenameComponent(Params, RequestId);
         'delete_footprint':     Result := Lib_DeleteFootprint(Params, RequestId);

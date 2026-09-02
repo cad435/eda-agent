@@ -13,7 +13,7 @@ Const
     // returns, mismatch means Altium is running a stale compiled script
     // (DelphiScript caches compiled units until the script project is
     // reopened or Altium is restarted).
-    SCRIPT_VERSION = '2026.09.01.3';
+    SCRIPT_VERSION = '2026.09.02.1';
 
     // How far up the mechanical layers a pair tidy looks. Altium allows 1024,
     // and checking every combination of those is a million probes for a stack
@@ -56,6 +56,24 @@ Const
     // (track width, hole size, annular ring) are orders of magnitude
     // below it.
     MAX_INT = 1000000000;
+
+    // TLibIdentifierKind (scripting unit RT_Library), the first argument
+    // of SchServer.LoadComponent: 0 Any, 1 NameNoType, 2 NameWithType,
+    // 3 FullPath, 4 VaultName. Only 4 is declared here because only the
+    // managed case is used: the identifier is then the connected
+    // Workspace (Vault) name and the third argument a Design Item ID.
+    //
+    // Spelled as a number because eLibIdentifierKind_VaultName is not a
+    // predefined identifier in this host. Naming it would fault at
+    // RUNTIME, and whether Try/Except can catch that is contested in
+    // this repository (see docs/RELEASE_VERIFICATION.md), so the safe
+    // move is to not depend on the answer.
+    LIB_IDENT_KIND_VAULT_NAME = 4;
+
+    // TLibrarySource, reported per entry of IntegratedLibraryManager's
+    // available-library list: 0 Undefined, 1 File, 2 Vault. This is what
+    // separates file libraries from managed Workspace content.
+    LIB_SRC_VAULT = 2;
 
 Var
     WorkspaceDir : String;

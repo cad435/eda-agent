@@ -7474,6 +7474,175 @@ Begin
 End;
 
 {..............................................................................}
+{..............................................................................}
+{ Gen_PlaceSchVaultComponents - Bulk placement of MANAGED (Vault) components.  }
+{                                                                              }
+{ Same shape as Gen_PlaceSchComponentsFromLibrary, different loader. A file    }
+{ library component is loaded by (LibReference, LibraryPath); a managed one    }
+{ has neither, and is loaded by (LibIdentifierKind, LibraryIdentifier,         }
+{ DesignItemID) through SchServer.LoadComponent with the kind set to           }
+{ LIB_IDENT_KIND_VAULT_NAME. Everything after the load - AddSchObject,         }
+{ MoveToXY, orientation, designator, registration - is identical, because      }
+{ once loaded it is an ordinary ISch_Component that happens to carry the       }
+{ managed link.                                                                }
+{                                                                               }
+{ The load is the one call that can fail for two very different reasons, and    }
+{ they are reported apart: an exception means SchServer.LoadComponent is not    }
+{ callable in this host at all (then EVERY op fails the same way and the batch  }
+{ diag says so), while a Nil return means that one Design Item ID did not       }
+{ resolve in this Workspace. Collapsing those two into one "failed" count would }
+{ send a caller hunting for a typo in an ID when the method never existed.      }
+{                                                                               }
+{ Each op: design_item_id, x, y, designator, rotation. The Workspace name is    }
+{ batch-level (params.vault), not per op: one sheet placed out of two different }
+{ Workspaces is not a real case, and resolving it per op would multiply the     }
+{ available-library scan by the batch size.                                     }
+{..............................................................................}
+
+Function Gen_PlaceSchVaultComponents(Params : String; RequestId : String) : String;
+Var
+    PlaceStr, Op, Remaining, ItemsJson, ResponseBody, Diag : String;
+    VaultName, DesignItemId, Desig, LinkedId, Reason : String;
+    OpCount, Placed, Failed, Rotation, OrientationVal, VaultCount : Integer;
+    X, Y : Integer;
+    SchDoc : ISch_Document;
+    Comp : ISch_Component;
+    LoadRaised, AnyLoadRaised, Ok : Boolean;
+Begin
+    PlaceStr := ExtractJsonValue(Params, 'placements');
+    If PlaceStr = '' Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'MISSING_PARAM', 'placements is required');
+        Exit;
+    End;
+
+    SchDoc := SchServer.GetCurrentSchDocument;
+    If SchDoc = Nil Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'NO_SCHEMATIC', 'No schematic document is active');
+        Exit;
+    End;
+
+    Diag := '';
+    VaultName := '';
+    VaultCount := 0;
+    If Not ResolveVaultLibrary(ExtractJsonValue(Params, 'vault'), VaultName,
+        VaultCount, Diag) Then
+    Begin
+        Result := BuildErrorResponse(RequestId, 'VAULT_NOT_RESOLVED',
+            'no single managed library to address (classified ' + IntToStr(VaultCount)
+            + '); pass vault=<Workspace name> from lib_list_vault_libraries. '
+            + Diag);
+        Exit;
+    End;
+
+    Placed := 0;
+    Failed := 0;
+    OpCount := 0;
+    Remaining := PlaceStr;
+    ItemsJson := '';
+    AnyLoadRaised := False;
+
+    SchServer.ProcessControl.PreProcess(SchDoc, '');
+    Try
+        While True Do
+        Begin
+            Op := NextBatchOp(Remaining);
+            If Op = '' Then Break;
+            OpCount := OpCount + 1;
+
+            DesignItemId := GetBatchField(Op, 'design_item_id');
+            Desig := GetBatchField(Op, 'designator');
+            X := StrToIntDef(GetBatchField(Op, 'x'), 0);
+            Y := StrToIntDef(GetBatchField(Op, 'y'), 0);
+            Rotation := StrToIntDef(GetBatchField(Op, 'rotation'), 0);
+
+            Ok := False;
+            Reason := '';
+            LinkedId := '';
+
+            If DesignItemId = '' Then
+            Begin
+                Inc(Failed);
+                Reason := 'MISSING_DESIGN_ITEM_ID';
+            End
+            Else
+            Begin
+                { The load is the risky call, so it gets its own Try and the   }
+                { two failure modes are kept apart (see the header note).      }
+                Comp := Nil;
+                LoadRaised := False;
+                Try
+                    Comp := SchServer.LoadComponent(LIB_IDENT_KIND_VAULT_NAME,
+                        VaultName, DesignItemId);
+                Except
+                    LoadRaised := True;
+                End;
+
+                If LoadRaised Then
+                Begin
+                    AnyLoadRaised := True;
+                    Inc(Failed);
+                    Reason := 'LOAD_RAISED';
+                End
+                Else If Comp = Nil Then
+                Begin
+                    Inc(Failed);
+                    Reason := 'NOT_FOUND_IN_VAULT';
+                End
+                Else
+                Begin
+                    Try SchDoc.AddSchObject(Comp); Except End;
+                    Try Comp.MoveToXY(MilsToCoord(X), MilsToCoord(Y)); Except End;
+
+                    OrientationVal := 0;
+                    If Rotation = 90 Then OrientationVal := 1
+                    Else If Rotation = 180 Then OrientationVal := 2
+                    Else If Rotation = 270 Then OrientationVal := 3;
+                    Try Comp.SetState_Orientation(OrientationVal); Except End;
+
+                    If Desig <> '' Then
+                        Try Comp.Designator.Text := Desig; Except End;
+
+                    { Read the managed link back off the placed component.     }
+                    { This is the only evidence that the placement is linked   }
+                    { to the Workspace item rather than a loose copy of its    }
+                    { symbol, and it is cheap, so it is not optional.          }
+                    Try LinkedId := Comp.DesignItemId; Except End;
+
+                    SchRegisterObject(SchDoc, Comp);
+                    Inc(Placed);
+                    Ok := True;
+                End;
+            End;
+
+            If ItemsJson <> '' Then ItemsJson := ItemsJson + ',';
+            ItemsJson := ItemsJson + '{"designator":"' + EscapeJsonString(Desig) + '"'
+                + ',"design_item_id":"' + EscapeJsonString(DesignItemId) + '"'
+                + ',"placed":' + BoolToJsonStr(Ok)
+                + ',"linked_design_item_id":"' + EscapeJsonString(LinkedId) + '"'
+                + ',"reason":"' + EscapeJsonString(Reason) + '"}';
+        End;
+    Finally
+        SchServer.ProcessControl.PostProcess(SchDoc, 'Edit');
+        SchDoc.GraphicallyInvalidate;
+    End;
+
+    If AnyLoadRaised Then
+        Diag := Diag + 'SchServer.LoadComponent raised, the managed loader is '
+            + 'not callable in this host (an unknown method is a runtime error '
+            + 'here, not a compile error), so no Design Item ID could be tried;';
+
+    ResponseBody := '{"placed":' + IntToStr(Placed)
+        + ',"failed":' + IntToStr(Failed)
+        + ',"total":' + IntToStr(OpCount)
+        + ',"vault":"' + EscapeJsonString(VaultName) + '"'
+        + ',"loader_callable":' + BoolToJsonStr(Not AnyLoadRaised)
+        + ',"items":[' + ItemsJson + ']'
+        + ',"diag":"' + EscapeJsonString(Diag) + '"}';
+    Result := BuildSuccessResponse(RequestId, ResponseBody);
+End;
+
 { Gen_PlaceNetLabels - Bulk net-label placement on the active schematic.        }
 { Params: labels = 'text=VCC;x=100;y=200;orientation=0~~text=GND;x=...'         }
 { One PreProcess/PostProcess wraps the whole batch; cuts ~1s/label of overhead. }
@@ -10385,6 +10554,7 @@ Begin
         'set_sch_components_parameters': Result := Gen_SetSchComponentsParameters(Params, RequestId);
         'set_sch_text_positions':      Result := Gen_SetSchTextPositions(Params, RequestId);
         'place_sch_components_from_library': Result := Gen_PlaceSchComponentsFromLibrary(Params, RequestId);
+        'place_sch_vault_components': Result := Gen_PlaceSchVaultComponents(Params, RequestId);
         'attach_spice_primitives':    Result := Gen_AttachSpicePrimitivesBatch(Params, RequestId);
     Else
         Result := BuildErrorResponse(RequestId, 'UNKNOWN_ACTION', 'Unknown generic action: ' + Action);

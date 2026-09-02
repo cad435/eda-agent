@@ -2493,6 +2493,116 @@ def register_generic_tools(mcp):
         )
 
     @mcp.tool()
+    async def sch_place_vault_components(
+        placements: list[dict[str, Any]],
+        vault: str = "",
+        document_path: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Place MANY MANAGED (Workspace/Vault) components in ONE call.
+
+        The managed counterpart of ``sch_place_components``. Use THIS one
+        whenever the parts live in an Altium Workspace instead of a
+        file library: a managed component has no library path and no
+        lib-ref, it is addressed by (Workspace name, Design Item ID), and
+        the placed component keeps the link to that Workspace item -- which
+        is what makes it show up as managed rather than as a loose copy of
+        the symbol. Placing such a part through ``sch_place_components``
+        cannot work, there is no path to give it.
+
+        A VPN (or any other parameter) is NOT resolved here -- the managed
+        API has no reverse lookup from a parameter value to a Design Item
+        ID, so resolve it outside this server and pass the ID. Verify an ID
+        first with ``lib_get_vault_component`` if you are unsure it exists.
+
+        TARGET DOCUMENT: placement lands on the ACTIVE schematic. Right
+        after ``app_create_document`` the new sheet is NOT auto-focused, so
+        without ``document_path`` parts can silently land on a *different*
+        open sheet. Pass ``document_path`` (absolute .SchDoc path) and this
+        tool focuses that sheet first, always set it when you have just
+        created the target sheet.
+
+        Args:
+            placements: list of placement dicts, each with:
+                - design_item_id (str, required), the managed item's ID
+                - x, y (int, mils), placement location
+                - designator (str, optional), override designator
+                - rotation (int, optional), 0 / 90 / 180 / 270
+            vault: Workspace name for the whole batch. Omit while exactly
+                one Workspace is connected; on VAULT_NOT_RESOLVED take it
+                from ``lib_list_vault_libraries``. It is batch-level on
+                purpose: one sheet placed out of two Workspaces is not a
+                real case, and resolving per part would repeat the
+                available-library scan for every placement.
+            document_path: absolute path of the .SchDoc to place onto,
+                focused before placement so parts cannot land on the wrong
+                sheet. Omitted uses the current active document.
+
+        Example, place three managed parts:
+            sch_place_vault_components(placements=[
+                {"design_item_id": "CMP-1234-00001",
+                 "x": 1000, "y": 2000, "designator": "U1"},
+                {"design_item_id": "CMP-0042-00007",
+                 "x": 1500, "y": 2000, "designator": "R1"},
+                {"design_item_id": "CMP-0042-00009",
+                 "x": 2000, "y": 2000, "designator": "C1",
+                 "rotation": 90},
+            ])
+
+        Returns:
+            {"placed", "failed", "total", "vault",
+             "loader_callable": bool, "items": [...], "diag"}
+            Each item carries ``linked_design_item_id`` read back off the
+            placed component: that is the evidence the placement is linked
+            to the Workspace item, so an empty one on a "placed" item means
+            the symbol landed WITHOUT its managed link. ``reason`` tells
+            NOT_FOUND_IN_VAULT (that one ID did not resolve) apart from
+            LOAD_RAISED (the managed loader is not callable at all, which
+            ``loader_callable``/``diag`` then report for the whole batch).
+        """
+        op_strs: list[str] = []
+        for p in placements:
+            item_id = str(p.get("design_item_id", "")).strip()
+            if not item_id:
+                continue
+            fields = [
+                f"design_item_id={payload_safe(item_id)}",
+                f"x={int(p.get('x', 0))}",
+                f"y={int(p.get('y', 0))}",
+                f"rotation={int(p.get('rotation', 0))}",
+            ]
+            if p.get("designator"):
+                fields.append(f"designator={p['designator']}")
+            op_strs.append(";".join(fields))
+
+        if not op_strs:
+            return {"error": "No valid placements", "placed": 0}
+
+        bridge = get_bridge()
+        # Focus the target sheet first so placement cannot land on a
+        # different open document (placement targets the active doc, and a
+        # freshly created sheet is not auto-focused).
+        if document_path:
+            focus = await bridge.send_command_async(
+                "application.set_active_document",
+                {"file_path": document_path},
+            )
+            if isinstance(focus, dict) and not focus.get("success", True):
+                return {
+                    "error": "FOCUS_FAILED",
+                    "reason": f"could not focus {document_path} before "
+                    "placement; aborting to avoid placing on the wrong "
+                    "sheet",
+                    "focus_result": focus,
+                    "placed": 0,
+                }
+        params: dict[str, Any] = {"placements": "~~".join(op_strs)}
+        if vault:
+            params["vault"] = vault
+        return await bridge.send_command_async(
+            "generic.place_sch_vault_components", params
+        )
+
+    @mcp.tool()
     async def sim_attach_primitives(
         attachments: list[dict[str, str]],
     ) -> dict[str, Any]:

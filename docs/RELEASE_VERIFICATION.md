@@ -1,4 +1,4 @@
-# Release verification: 2026.09.01.3
+# Release verification: 2026.09.02.1
 
 Everything below is Pascal that FPC and the linter have checked and that
 **Altium's DelphiScript engine has never executed**. The two are not the
@@ -9,6 +9,12 @@ polling loop.
 Work top to bottom. Step 1 needs nothing but Altium and takes seconds,
 and is the step most likely to catch a compile-level problem. If it
 fails, stop and fix that before running the rest.
+
+This build carries one addition beyond the batch the steps below were
+written for: managed (Workspace / Vault) placement, step 19. It is the
+first code here to call the managed side of the object model at all, so
+if there is time for only one step, run **19a** rather than step 1: it
+is the one that can fail by not existing.
 
 If there is only time for some of it, the risk is not evenly spread.
 What separates the steps is whether the Altium property being written
@@ -33,6 +39,9 @@ works elsewhere cannot be an undeclared identifier:
 | 17, component UniqueId | `UniqueId` on a placed component | no, nowhere | highest, and a wrong id costs the next Update PCB |
 | 18, pin owner part | `OwnerPartId` | yes, by two independent reference scripts | medium, behavioural not declarative |
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
+| 19, managed loader | `LoadComponent` | no, nowhere | highest, the whole placement depends on it |
+| 19, managed library list | `AvailableLibraryPath`, `AvailableLibraryType` | no, nowhere | high, and without them no Workspace can be named |
+| 19, managed item resolve | `FindComponentSymbol`, `GetOrderedRevisionList`, `GetLifeCycleState`, `GetComponentPlacementParameters` | no, nowhere | high, but read-only and each is caught on its own |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -139,7 +148,7 @@ objects you can delete afterwards.
 app_ping
 ```
 
-Expect `altium_script_version` = `2026.09.01.3`, `version_match` =
+Expect `altium_script_version` = `2026.09.02.1`, `version_match` =
 `true`, and `mcp_server_version` = `0.5.0`.
 
 Those are two different versions and they fail differently.
@@ -924,6 +933,136 @@ as an error.
 
 Save with `app_save_all` and reopen the library before trusting any of
 it. A library edit is real in memory and absent from disk until then.
+
+---
+
+## 19. Managed (Vault) placement
+
+The first code in this repository to call the managed side of Altium's
+object model. A file-library component is loaded by (LibReference,
+LibraryPath); a managed one has neither and is loaded by
+(LibIdentifierKind, LibraryIdentifier, DesignItemID). Only the loader
+differs, so everything after it (`AddSchObject`, `MoveToXY`,
+orientation, designator, registration) is the same code the file-library
+path already uses.
+
+Added: `Lib_ListVaultLibraries`, `Lib_GetVaultComponent` and
+`ResolveVaultLibrary` in `Library.pas`, `Gen_PlaceSchVaultComponents` in
+`Generic.pas`, reached by `lib_list_vault_libraries`,
+`lib_get_vault_component` and `sch_place_vault_components`.
+
+The interface members were read out of `Altium.SDK.Interfaces.dll` by
+reflection and the two enums out of Delphi RTTI in
+`ScriptingSystem.dll` (unit `RT_Library`), so the names and argument
+orders come from the shipped object model rather than from guesswork.
+That establishes that AD20 **declares** them. It does not establish that
+this DelphiScript host **exposes** them, which is what these steps are
+for.
+
+| Added call | Written elsewhere in shipped code? | Risk |
+|---|---|---|
+| `SchServer.LoadComponent(kind, ident, id)` | no, nowhere | highest, and the placement depends on it entirely |
+| `IntegratedLibraryManager.AvailableLibraryCount` / `AvailableLibraryPath` / `AvailableLibraryType` | no; only `InstallLibrary` / `UnInstallLibrary` are | high |
+| `FindComponentSymbol`, `GetOrderedRevisionList` | no, and their `Var` out-parameters are unexercised anywhere in this codebase | high |
+| `FindComponentLibraryPath`, `FindComponentDisplayPath`, `GetLifeCycleState`, `GetComponentPlacementParameters` | no, nowhere | high |
+| `ISch_Component.DesignItemId` (read) | no, nowhere | medium |
+| `LIB_IDENT_KIND_VAULT_NAME`, `LIB_SRC_VAULT` | own `Const` block in `Main.pas` | none, integers on purpose |
+
+`TLibIdentifierKind` = 0 Any, 1 NameNoType, 2 NameWithType, 3 FullPath,
+**4 VaultName**. `TLibrarySource` = 0 Undefined, 1 File, **2 Vault**.
+They are spelled as numbers because `eLibIdentifierKind_VaultName` is
+not a predefined identifier in this host, and naming it would be the
+very fault these steps are hunting.
+
+Every managed call sits in its own inner `Try`, on the assumption that
+an unavailable method raises, is caught, and leaves a `diag` naming it.
+**This document's own preamble asserts the opposite**: that an
+undeclared identifier faults where `Try/Except` cannot reach it and
+halts the polling loop. Both claims are in this repository and they
+cannot both hold here.
+
+Until 19a settles it, assume the harsher one. Run 19a as the FIRST call
+after the restart, with nothing else in flight, and treat a dead bridge
+as a possible outcome rather than a surprise. If the loop stops, that is
+not a bug in the handler, it is the answer: the host does not expose the
+call and the inner `Try` does not save it. Re-run `StartMCPServer` and
+record which call did it.
+
+### 19a. Is the managed library list readable at all?
+
+`lib_list_vault_libraries`, nothing else in flight.
+
+Expected: `total` matching the count under *Data Management > File-based
+Libraries* plus the connected Workspace, and exactly one entry with
+`is_vault` = `true` whose `identifier` is the Workspace name. Keep that
+name; 19b and 19c need it if the classification is off.
+
+The two informative failures:
+
+* `source` = `-1` on every entry, with `diag` naming
+  `AvailableLibraryType`. The list is readable but the file/managed
+  distinction is not, so every later call needs an explicit `vault=`.
+* `ENUM_FAILED`. `AvailableLibraryCount` itself is not callable and no
+  part of this step can work. Stop here.
+
+### 19b. Does a Design Item ID resolve?
+
+`lib_get_vault_component` with a Design Item ID read off the Components
+panel, for a part you know is in that Workspace. Worth writing the ID
+down before starting: hunting for one mid-session wastes the session.
+
+Expected: `found_symbol` = `true`, `symbol_reference` naming the symbol
+the panel shows, a `lifecycle_state` matching the panel, a non-empty
+`revisions`, and an empty `diag`.
+
+Read `diag` before believing any empty field. An empty
+`lifecycle_state` with `GetLifeCycleState not callable;` in `diag` is a
+missing method; an empty one with an empty `diag` is a real empty value.
+Telling those two apart is the only reason the field exists.
+
+### 19c. Does a managed placement keep its link?
+
+Placement WRITES. Scratch SchDoc in a throwaway project, not a real
+design.
+
+`sch_place_vault_components` with one placement: the ID from 19b, a
+known x/y, an explicit designator.
+
+Expected: `placed` = `1`, `loader_callable` = `true`, and the item's
+`linked_design_item_id` echoing the ID that was asked for.
+
+Then look at the sheet, because the reply cannot see this:
+
+1. The symbol sits at the coordinates given, with the designator set.
+2. Altium shows the component as **managed**, not as a loose copy of a
+   symbol. `linked_design_item_id` coming back empty on an otherwise
+   placed item is exactly that failure: the geometry landed and the
+   Workspace link did not.
+3. Save the sheet, close it, reopen it, read the component again. A link
+   that is written but never committed disappears on save, and this
+   codebase has already been bitten by precisely that on the PCB side,
+   where `Pad.Net` needed a `PCBM_BeginModify` / `PCBM_EndModify`
+   bracket to survive a save. If the link is gone after a round trip,
+   the placement needs the schematic equivalent and the current code is
+   wrong.
+
+`loader_callable` = `false` with `LOAD_RAISED` on every item means
+`SchServer.LoadComponent` is not exposed by this host. That is this
+step's central risk, and it is reported per batch rather than per part
+so it cannot be mistaken for a batch of bad IDs.
+
+### Deliberately not in step 19
+
+Resolving a VPN, or any other parameter value, to a Design Item ID. The
+managed API offers no reverse lookup from a parameter to an item, so it
+would mean scanning a whole library per query. That mapping is
+maintained outside this server, and these tools take the Design Item ID
+as given.
+
+Pinning a specific revision. `LoadComponent` takes an item, not a
+revision, so a placement gets whatever revision the Workspace resolves
+to. `lib_get_vault_component` reports the revision list so a caller can
+see what was on offer, but nothing here chooses among them.
 
 ---
 
