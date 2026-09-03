@@ -464,6 +464,49 @@ Begin
         Else If PropName = 'LibReference'       Then Result := Obj.LibReference
         Else If PropName = 'SourceLibraryName'  Then Result := Obj.SourceLibraryName
         Else If PropName = 'DesignItemId'       Then Result := Obj.DesignItemId
+
+        { MANAGED (Workspace) IDENTITY, read-only. A managed component has
+          no library path: it is addressed by a triple, and these are the
+          fields Altium itself writes onto the placed part. LibIdentifierKind
+          and LibraryIdentifier are the kind and identifier it matched on;
+          the GUIDs name the Workspace, the item and the revision, which is
+          the identity the sheet actually persists (there is no
+          LibraryIdentifier field in the file at all). Reading them off a
+          part Altium placed is how a placement learns the exact triple that
+          resolves here, instead of guessing at a Workspace name. Component
+          only, and never written from here: re-pointing a placed part at
+          another Workspace item is a re-link, not a property edit. }
+        Else If (PropName = 'LibIdentifierKind') Or (PropName = 'LibraryIdentifier')
+             Or (PropName = 'VaultGUID') Or (PropName = 'ItemGUID')
+             Or (PropName = 'RevisionGUID') Or (PropName = 'SymbolReference')
+             Or (PropName = 'SymbolVaultGUID') Or (PropName = 'SymbolItemGUID')
+             Or (PropName = 'SymbolRevisionGUID') Then
+        Begin
+            If Obj.ObjectId <> eSchComponent Then
+            Begin
+                NotePropertyDiag('unreadable', PropName);
+                Result := '';
+            End
+            Else
+            Begin
+                Comp := Obj;
+                Try
+                    If PropName = 'LibIdentifierKind' Then
+                        Result := IntToStr(Comp.LibIdentifierKind)
+                    Else If PropName = 'LibraryIdentifier'  Then Result := Comp.LibraryIdentifier
+                    Else If PropName = 'VaultGUID'          Then Result := Comp.VaultGUID
+                    Else If PropName = 'ItemGUID'           Then Result := Comp.ItemGUID
+                    Else If PropName = 'RevisionGUID'       Then Result := Comp.RevisionGUID
+                    Else If PropName = 'SymbolReference'    Then Result := Comp.SymbolReference
+                    Else If PropName = 'SymbolVaultGUID'    Then Result := Comp.SymbolVaultGUID
+                    Else If PropName = 'SymbolItemGUID'     Then Result := Comp.SymbolItemGUID
+                    Else Result := Comp.SymbolRevisionGUID;
+                Except
+                    NotePropertyDiag('failed', PropName);
+                    Result := '';
+                End;
+            End;
+        End
         // Which part of a multi-part symbol owns this primitive (0 = shared
         // across all parts). Without it a caller querying a multi-part
         // library symbol cannot tell which part a returned primitive is on.
@@ -7503,7 +7546,9 @@ Function Gen_PlaceSchVaultComponents(Params : String; RequestId : String) : Stri
 Var
     PlaceStr, Op, Remaining, ItemsJson, ResponseBody, Diag : String;
     VaultName, DesignItemId, Desig, LinkedId, Reason : String;
+    LinkedVaultGuid, LinkedItemGuid, LinkedRevGuid : String;
     OpCount, Placed, Failed, Rotation, OrientationVal, VaultCount : Integer;
+    IdentKind : Integer;
     X, Y : Integer;
     SchDoc : ISch_Document;
     Comp : ISch_Component;
@@ -7530,11 +7575,19 @@ Begin
         VaultCount, Diag) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'VAULT_NOT_RESOLVED',
-            'no single managed library to address (classified ' + IntToStr(VaultCount)
-            + '); pass vault=<Workspace name> from lib_list_vault_libraries. '
-            + Diag);
+            VaultNotResolvedMessage(VaultCount, Diag));
         Exit;
     End;
+
+    { WHICH KIND OF IDENTIFIER the loader is given was hardcoded to
+      VaultName, which is only right if that is how this host addresses
+      managed content. It is an integer the object model interprets, not a
+      call, so letting a caller override it costs nothing and settles the
+      question a hardcoded 4 cannot: read LibIdentifierKind off a component
+      Altium placed itself and pass that. TLibIdentifierKind is 0 Any,
+      1 NameNoType, 2 NameWithType, 3 FullPath, 4 VaultName. }
+    IdentKind := StrToIntDef(ExtractJsonValue(Params, 'lib_identifier_kind'),
+        LIB_IDENT_KIND_VAULT_NAME);
 
     Placed := 0;
     Failed := 0;
@@ -7573,7 +7626,7 @@ Begin
                 Comp := Nil;
                 LoadRaised := False;
                 Try
-                    Comp := SchServer.LoadComponent(LIB_IDENT_KIND_VAULT_NAME,
+                    Comp := SchServer.LoadComponent(IdentKind,
                         VaultName, DesignItemId);
                 Except
                     LoadRaised := True;
@@ -7609,6 +7662,16 @@ Begin
                     { to the Workspace item rather than a loose copy of its    }
                     { symbol, and it is cheap, so it is not optional.          }
                     Try LinkedId := Comp.DesignItemId; Except End;
+                    { The GUIDs are the identity the sheet actually persists,
+                      and a DesignItemId can survive as plain text while the
+                      Workspace link never forms. Reading only the ID would
+                      report that failure as a success. }
+                    LinkedVaultGuid := '';
+                    LinkedItemGuid := '';
+                    LinkedRevGuid := '';
+                    Try LinkedVaultGuid := Comp.VaultGUID; Except End;
+                    Try LinkedItemGuid := Comp.ItemGUID; Except End;
+                    Try LinkedRevGuid := Comp.RevisionGUID; Except End;
 
                     SchRegisterObject(SchDoc, Comp);
                     Inc(Placed);
@@ -7621,6 +7684,9 @@ Begin
                 + ',"design_item_id":"' + EscapeJsonString(DesignItemId) + '"'
                 + ',"placed":' + BoolToJsonStr(Ok)
                 + ',"linked_design_item_id":"' + EscapeJsonString(LinkedId) + '"'
+                + ',"linked_vault_guid":"' + EscapeJsonString(LinkedVaultGuid) + '"'
+                + ',"linked_item_guid":"' + EscapeJsonString(LinkedItemGuid) + '"'
+                + ',"linked_revision_guid":"' + EscapeJsonString(LinkedRevGuid) + '"'
                 + ',"reason":"' + EscapeJsonString(Reason) + '"}';
         End;
     Finally
@@ -7637,6 +7703,7 @@ Begin
         + ',"failed":' + IntToStr(Failed)
         + ',"total":' + IntToStr(OpCount)
         + ',"vault":"' + EscapeJsonString(VaultName) + '"'
+        + ',"lib_identifier_kind":' + IntToStr(IdentKind)
         + ',"loader_callable":' + BoolToJsonStr(Not AnyLoadRaised)
         + ',"items":[' + ItemsJson + ']'
         + ',"diag":"' + EscapeJsonString(Diag) + '"}';

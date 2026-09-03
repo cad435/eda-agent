@@ -7382,9 +7382,154 @@ End;
 { plausible-looking empty answer. What was reached and what was not is         }
 { reported in "diag" instead, so a failure names the call that failed.         }
 {                                                                              }
-{ Resolving a VPN (or any other parameter) to a Design Item ID is deliberately }
-{ NOT done here. These handlers take the ID as given.                          }
+{ Resolving a part number (or any other parameter value) to a Design Item ID   }
+{ is deliberately NOT done here. These handlers take the ID as given.          }
 {..............................................................................}
+
+{ VaultFromPlacedComponents - name the Workspace off parts Altium placed.      }
+{                                                                              }
+{ The available-library list is not a source of Workspace names on an          }
+{ installation with no file libraries: it is empty, and a connected Workspace  }
+{ need not appear in it at all. A managed component already on the sheet is    }
+{ one, because Altium wrote the identifier onto it when it placed it, so that  }
+{ spelling resolves by construction.                                           }
+{                                                                              }
+{ MEASURED, and the whole reason for the kind preference: one design carried   }
+{ the SAME VaultGUID under TWO identifiers, the Workspace's current name with  }
+{ LibIdentifierKind 4 and an older display name of the same Workspace with     }
+{ kind 1. Taking whichever the iterator reached first would hand the loader an }
+{ alias, so kind 4 (VaultName) wins - it is the kind the loader is given - and }
+{ everything seen is reported rather than silently dropped.                    }
+{                                                                              }
+{ A VaultGUID is what makes a component managed. SourceLibraryName is set on   }
+{ file-library parts too, so it cannot carry this decision on its own.         }
+Procedure ScanSheetForVaultIdent(SchDoc : ISch_Document;
+    Var Identifier : String; Var Fallback : String; Var Seen : String);
+Var
+    Iter : ISch_Iterator;
+    Obj : ISch_GraphicalObject;
+    Comp : ISch_Component;
+    Ident, Guid, Entry : String;
+    Kind : Integer;
+Begin
+    If SchDoc = Nil Then Exit;
+    Iter := SchDoc.SchIterator_Create;
+    If Iter = Nil Then Exit;
+    Try
+        Iter.AddFilter_ObjectSet(MkSet(eSchComponent));
+        Obj := Iter.FirstSchObject;
+        While Obj <> Nil Do
+        Begin
+            Try
+                Comp := Obj;
+                Ident := '';
+                Guid := '';
+                Kind := -1;
+                Try Ident := Comp.LibraryIdentifier; Except End;
+                Try Guid := Comp.VaultGUID; Except End;
+                Try Kind := Comp.LibIdentifierKind; Except End;
+
+                If (Guid <> '') And (Trim(Ident) <> '') Then
+                Begin
+                    Entry := IntToStr(Kind) + ':' + Ident;
+                    If Pos('|' + Entry + '|', '|' + Seen + '|') = 0 Then
+                    Begin
+                        If Seen = '' Then Seen := Entry
+                        Else Seen := Seen + '|' + Entry;
+                    End;
+                    If (Kind = LIB_IDENT_KIND_VAULT_NAME) And (Identifier = '') Then
+                        Identifier := Ident
+                    Else If Fallback = '' Then
+                        Fallback := Ident;
+                End;
+            Except End;
+            Obj := Iter.NextSchObject;
+        End;
+    Finally
+        SchDoc.SchIterator_Destroy(Iter);
+    End;
+End;
+
+{ VaultFromPlacedComponents - the active sheet first, then every OPEN sheet.   }
+{                                                                              }
+{ MEASURED, and the reason this does not stop at the active document: placing  }
+{ onto a FRESH sheet is the normal case, and a fresh sheet has no managed part }
+{ to learn the name from, so an active-only scan refused exactly the situation }
+{ the tool exists for. Any other open sheet of the design answers it.          }
+{                                                                              }
+{ Only sheets Altium already has open are read. GetSchDocumentByPath would     }
+{ LOAD one that is not, and a project can carry dozens, so a name lookup must  }
+{ not turn into opening the whole design.                                      }
+Function VaultFromPlacedComponents(Var Identifier : String; Var Seen : String;
+    Var Diag : String) : Boolean;
+Var
+    SchDoc : ISch_Document;
+    Workspace : IWorkspace;
+    Project : IProject;
+    Doc : IDocument;
+    Fallback, FilePath : String;
+    I, J : Integer;
+    IsOpen : Boolean;
+Begin
+    Result := False;
+    Identifier := '';
+    Seen := '';
+    Fallback := '';
+
+    SchDoc := Nil;
+    Try SchDoc := SchServer.GetCurrentSchDocument; Except End;
+    Try ScanSheetForVaultIdent(SchDoc, Identifier, Fallback, Seen); Except End;
+
+    If Identifier = '' Then
+    Begin
+        Workspace := Nil;
+        Try Workspace := GetWorkspace; Except End;
+        If Workspace <> Nil Then
+        Begin
+            For I := 0 To Workspace.DM_ProjectCount - 1 Do
+            Begin
+                If Identifier <> '' Then Break;
+                Project := Workspace.DM_Projects(I);
+                If Project = Nil Then Continue;
+                For J := 0 To Project.DM_LogicalDocumentCount - 1 Do
+                Begin
+                    If Identifier <> '' Then Break;
+                    Doc := Project.DM_LogicalDocuments(J);
+                    If Doc = Nil Then Continue;
+                    If Doc.DM_DocumentKind <> 'SCH' Then Continue;
+
+                    FilePath := Doc.DM_FullPath;
+                    IsOpen := False;
+                    Try IsOpen := Client.IsDocumentOpen(FilePath); Except End;
+                    If Not IsOpen Then Continue;
+
+                    SchDoc := Nil;
+                    Try SchDoc := SchServer.GetSchDocumentByPath(FilePath); Except End;
+                    Try ScanSheetForVaultIdent(SchDoc, Identifier, Fallback, Seen); Except End;
+                End;
+            End;
+        End;
+    End;
+
+    { No kind-4 part, but a managed one under another kind, is still a real
+      Workspace name and better than refusing outright. Say which case it
+      was, because it decides how far the caller should trust it. }
+    If (Identifier = '') And (Fallback <> '') Then
+    Begin
+        Identifier := Fallback;
+        Diag := Diag + 'Workspace name taken from a placed managed component '
+            + 'that is NOT addressed by VaultName (seen: ' + Seen
+            + '), it may be an alias;';
+    End;
+
+    If Identifier = '' Then
+        Diag := Diag + 'no managed component on any OPEN sheet to read a '
+            + 'Workspace name off, so the design cannot supply one either: '
+            + 'pass vault=<Workspace name>, or open a sheet of this design '
+            + 'that already carries managed parts;';
+
+    Result := Identifier <> '';
+End;
 
 { ResolveVaultLibrary - decide which managed library to address.               }
 {                                                                              }
@@ -7397,7 +7542,7 @@ Function ResolveVaultLibrary(Requested : String; Var Identifier : String;
     Var VaultCount : Integer; Var Diag : String) : Boolean;
 Var
     I, Total, Kind : Integer;
-    Path : String;
+    Path, PlacedSeen : String;
     TypeFailed : Boolean;
 Begin
     Result := False;
@@ -7440,22 +7585,84 @@ Begin
         End;
     End;
 
+    { An empty list used to leave Diag empty, which made "classified 0"
+      indistinguishable from a broken call. It is neither: the list covers
+      INSTALLED libraries, and a connected Workspace does not have to appear
+      in it, so on an installation with no file libraries it is empty by
+      construction and this resolver can never succeed. Say that, and name
+      the way out. }
+    If Total = 0 Then
+        Diag := Diag + 'AvailableLibraryCount returned 0: no library is '
+            + 'available here to classify. That list covers INSTALLED '
+            + 'libraries and need not contain a connected Workspace, so this '
+            + 'is not evidence that none is connected;';
+
     If TypeFailed Then
         Diag := Diag + 'AvailableLibraryType not callable, no entry could be '
             + 'classified as managed;';
 
     Result := (VaultCount = 1) And (Identifier <> '');
+
+    { LAST RESORT, and the only source that works on a Workspace-only
+      installation: ask the design. MEASURED here - the loader places these
+      parts perfectly while this list stays empty, so refusing on an empty
+      list was blocking calls that would have succeeded. It needs a managed
+      part already on the active sheet, which a fresh empty design has not
+      got: that case still needs an explicit vault=. }
+    If Not Result Then
+    Begin
+        If VaultFromPlacedComponents(Identifier, PlacedSeen, Diag) Then
+        Begin
+            VaultCount := 1;
+            Result := True;
+            Diag := Diag + 'Workspace name read off a placed managed component ('
+                + PlacedSeen + ');';
+        End;
+    End;
 End;
 
 {..............................................................................}
+{ VaultNotResolvedMessage - tell the CALLER what to do, not just what failed.  }
+{                                                                              }
+{ This refusal is read by an agent, not a person watching a dialog, and the    }
+{ old text sent it somewhere useless: it said to take the name from            }
+{ lib_list_vault_libraries, which on a Workspace-only installation returns an  }
+{ empty list. So the steps are spelled out in the order that actually resolves }
+{ them, and the last one hands the question back to the user rather than       }
+{ letting a guess through: a wrong Workspace name still places components,     }
+{ they just come out linked to the wrong library, which looks right on the     }
+{ sheet and is wrong in the BOM.                                               }
+Function VaultNotResolvedMessage(VaultCount : Integer; Diag : String) : String;
+Begin
+    Result := 'VAULT_NOT_RESOLVED: no Workspace name could be determined '
+        + '(managed libraries classified: ' + IntToStr(VaultCount) + '). '
+        + 'DO THIS, IN ORDER: '
+        + '(1) Call lib_list_vault_libraries and read workspace_from_design. '
+        + 'If it is non-empty, retry this call with vault=<that name>. '
+        + '(2) If it is empty, no managed component sits on any sheet Altium '
+        + 'currently has OPEN, which is the normal state of a fresh sheet. '
+        + 'Open any other sheet of this design that already carries managed '
+        + '(Workspace) parts and retry, the name is read off those. '
+        + '(3) If this design has no managed part anywhere yet, ASK THE USER '
+        + 'for the Workspace name as Altium spells it (the name shown in the '
+        + 'Components panel / Workspace title) and pass it as vault=. '
+        + 'DO NOT GUESS IT and do not derive it from the project or company '
+        + 'name: a wrong name does not fail, it places components linked to '
+        + 'the wrong library, which looks correct on the sheet and is wrong '
+        + 'in the BOM. '
+        + 'Note that lib_get_vault_component/found_symbol is NOT a usable '
+        + 'existence check here, read its placeable field instead. '
+        + 'Diagnostics: ' + Diag;
+End;
+
 { Lib_ListVaultLibraries - what the environment offers, file and managed.      }
 { Reports every available library with its TLibrarySource so the caller can    }
 { name a Workspace for the managed handlers below. Read-only.                  }
 {..............................................................................}
 Function Lib_ListVaultLibraries(Params : String; RequestId : String) : String;
 Var
-    I, Total, Kind, VaultCount : Integer;
-    Path, ItemsJson, Diag : String;
+    I, Total, Kind, VaultCount, Installed : Integer;
+    Path, ItemsJson, Diag, FromDesign, DesignSeen : String;
     TypeFailed : Boolean;
 Begin
     If IntegratedLibraryManager = Nil Then
@@ -7466,10 +7673,19 @@ Begin
     End;
 
     Total := -1;
+    Installed := -1;
     Diag := '';
     Try
         Total := IntegratedLibraryManager.AvailableLibraryCount;
     Except End;
+    { The installed count separates "nothing is installed" from "the
+      available list is not telling us about it". Both read as an empty
+      libraries array otherwise. }
+    Try
+        Installed := IntegratedLibraryManager.InstalledLibraryCount;
+    Except
+        Diag := Diag + 'InstalledLibraryCount not callable;';
+    End;
     If Total < 0 Then
     Begin
         Result := BuildErrorResponse(RequestId, 'ENUM_FAILED',
@@ -7499,9 +7715,41 @@ Begin
         Diag := Diag + 'AvailableLibraryType not callable, source reported as -1 '
             + 'and is_vault is therefore not trustworthy;';
 
+    { NAME THE WORKSPACE ANYWAY. This tool is documented as the place a
+      caller learns the Workspace name from, and on a Workspace-only
+      installation the list it reads cannot supply one. A managed component
+      already in the design can, so report that separately rather than
+      answering "nothing" to the one question the tool exists to answer. }
+    FromDesign := '';
+    DesignSeen := '';
+    If Not VaultFromPlacedComponents(FromDesign, DesignSeen, Diag) Then
+        FromDesign := '';
+
+    { total 0 with an empty diag reads as "worked, there is nothing", which
+      is the wrong conclusion to hand a caller: on a Workspace-only
+      installation this list is empty and the Workspace is still there. }
+    If (Total = 0) And (FromDesign <> '') Then
+        Diag := Diag + 'AvailableLibraryCount returned 0, so no Workspace can '
+            + 'be named from this list: it enumerates INSTALLED libraries and '
+            + 'managed content need not appear in it at all. Use '
+            + 'workspace_from_design ("' + FromDesign + '"), which the managed '
+            + 'handlers also fall back to on their own;'
+    Else If Total = 0 Then
+        Diag := Diag + 'AvailableLibraryCount returned 0, so no Workspace can '
+            + 'be named from this list. It enumerates INSTALLED libraries, '
+            + 'and managed content need not appear in it at all: pass '
+            + 'vault=<Workspace name> to the managed handlers instead of '
+            + 'reading it from here;'
+    Else If VaultCount = 0 Then
+        Diag := Diag + 'no entry classified as managed (source 2), so no '
+            + 'Workspace can be named from this list;';
+
     Result := BuildSuccessResponse(RequestId,
         '{"total":' + IntToStr(Total)
+        + ',"installed_count":' + IntToStr(Installed)
         + ',"vault_count":' + IntToStr(VaultCount)
+        + ',"workspace_from_design":"' + EscapeJsonString(FromDesign) + '"'
+        + ',"workspace_identifiers_seen":"' + EscapeJsonString(DesignSeen) + '"'
         + ',"libraries":[' + ItemsJson + ']'
         + ',"diag":"' + EscapeJsonString(Diag) + '"}');
 End;
@@ -7522,8 +7770,13 @@ Var
     DesignItemId, VaultName, Diag : String;
     SymbolRef, SymbolLibPath, CompLibPath, DisplayPath : String;
     LifeCycle, RevList, PlaceParams : String;
-    VaultCount : Integer;
-    FoundSymbol, GotRevs : Boolean;
+    VaultCount, IdentKind, EffKind, ResolvedKind, K, Slot : Integer;
+    LoadKind, LSlot, LK : Integer;
+    KindProbe, TryRef, TryLibPath, LoadProbe : String;
+    ProbeId, ProbeVaultGuid, ProbeItemGuid, ProbeRevGuid : String;
+    FoundSymbol, GotRevs, SymbolCallRan, TryFound, TryRan : Boolean;
+    Placeable, LoaderCallable : Boolean;
+    Probe : ISch_Component;
 Begin
     DesignItemId := Trim(ExtractJsonValue(Params, 'design_item_id'));
     If DesignItemId = '' Then
@@ -7547,68 +7800,255 @@ Begin
         VaultCount, Diag) Then
     Begin
         Result := BuildErrorResponse(RequestId, 'VAULT_NOT_RESOLVED',
-            'no single managed library to address (classified ' + IntToStr(VaultCount)
-            + '); pass vault=<Workspace name> from lib_list_vault_libraries. '
-            + Diag);
+            VaultNotResolvedMessage(VaultCount, Diag));
         Exit;
     End;
 
+    { See the note in Gen_PlaceSchVaultComponents: the kind is an integer the
+      object model interprets, and a hardcoded VaultName cannot be told apart
+      from a wrong one. Overridable so the value a placed component reports
+      can be tried directly. }
+    IdentKind := StrToIntDef(ExtractJsonValue(Params, 'lib_identifier_kind'),
+        LIB_IDENT_KIND_VAULT_NAME);
+
     SymbolRef := '';
     SymbolLibPath := '';
+    KindProbe := '';
+    ResolvedKind := -1;
+    SymbolCallRan := False;
+    FoundSymbol := False;
+
+    { SWEEP THE FIVE KINDS rather than report one hardcoded failure. This is
+      a read-only lookup and there are five possible values of
+      TLibIdentifierKind, so the cost of finding out is five calls, against
+      an answer that cannot otherwise be obtained: a single kind coming back
+      false is indistinguishable from an ID that does not exist, and that
+      ambiguity is what made the original empty reply unreadable. The
+      requested kind goes first so a caller who named one gets that answer
+      even when several would resolve. }
+    For Slot := 0 To 5 Do
+    Begin
+        If Slot = 0 Then
+            K := IdentKind
+        Else
+        Begin
+            K := Slot - 1;
+            If K = IdentKind Then Continue;
+        End;
+        If (K < 0) Or (K > LIB_IDENT_KIND_VAULT_NAME) Then Continue;
+
+        TryFound := False;
+        TryRan := False;
+        TryRef := '';
+        TryLibPath := '';
+        Try
+            TryFound := IntegratedLibraryManager.FindComponentSymbol(
+                K, VaultName, DesignItemId, TryLibPath, TryRef);
+            TryRan := True;
+        Except End;
+
+        If KindProbe <> '' Then KindProbe := KindProbe + ',';
+        If Not TryRan Then
+            KindProbe := KindProbe + IntToStr(K) + ':raised'
+        Else If TryFound Then
+            KindProbe := KindProbe + IntToStr(K) + ':found'
+        Else
+            KindProbe := KindProbe + IntToStr(K) + ':no';
+
+        { Reachability is a property of the METHOD, not of one kind, so any
+          attempt that returned without raising proves it is callable. Only
+          all five raising means it is not there, which is the one case
+          'not callable' may be claimed for. }
+        If TryRan Then SymbolCallRan := True;
+        If Slot = 0 Then FoundSymbol := TryFound;
+
+        If TryFound And (ResolvedKind < 0) Then
+        Begin
+            ResolvedKind := K;
+            SymbolRef := TryRef;
+            SymbolLibPath := TryLibPath;
+        End;
+    End;
+
+    { Everything below reads with the kind that actually resolved, falling
+      back to the requested one so the reply stays about the triple the
+      caller asked about when nothing resolved at all. }
+    If ResolvedKind >= 0 Then
+    Begin
+        EffKind := ResolvedKind;
+        FoundSymbol := True;
+    End
+    Else
+        EffKind := IdentKind;
+
     CompLibPath := '';
     DisplayPath := '';
     LifeCycle := '';
     RevList := '';
     PlaceParams := '';
-    FoundSymbol := False;
     GotRevs := False;
 
-    Try
-        FoundSymbol := IntegratedLibraryManager.FindComponentSymbol(
-            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId,
-            SymbolLibPath, SymbolRef);
-    Except
-        Diag := Diag + 'FindComponentSymbol not callable;';
-    End;
+    If Not SymbolCallRan Then
+        Diag := Diag + 'FindComponentSymbol not callable for any kind ('
+            + KindProbe + '), the managed lookup is not exposed by this host;';
+
+    { THREE DIFFERENT FAILURES USED TO LOOK IDENTICAL from here: a wrong
+      Workspace name, an unknown Design Item ID, and a method this host does
+      not expose all answered with every field empty and an empty diag. The
+      call running and returning false is a fourth, and the most useful one
+      to be told apart, because it means the object model is reachable and
+      the TRIPLE is what did not resolve. Name the triple that was tried,
+      since the caller cannot otherwise tell which ID form went in. }
+    { State the fact and NOTHING about what it means: the loader probe below
+      is what decides. The long "your triple is wrong" advisory this used to
+      print here contradicted a successful load a few lines later, which is
+      the same species of misleading diagnosis this change exists to undo.
+      It now appears only where it still holds, beside a loader that also
+      came up empty. }
+    If SymbolCallRan And (Not FoundSymbol) Then
+        Diag := Diag + 'FindComponentSymbol returned false for every kind ('
+            + KindProbe + ');';
 
     Try
         CompLibPath := IntegratedLibraryManager.FindComponentLibraryPath(
-            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+            EffKind, VaultName, DesignItemId);
     Except
         Diag := Diag + 'FindComponentLibraryPath not callable;';
     End;
 
     Try
         DisplayPath := IntegratedLibraryManager.FindComponentDisplayPath(
-            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+            EffKind, VaultName, DesignItemId);
     Except
         Diag := Diag + 'FindComponentDisplayPath not callable;';
     End;
 
     Try
         LifeCycle := IntegratedLibraryManager.GetLifeCycleState(
-            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+            EffKind, VaultName, DesignItemId);
     Except
         Diag := Diag + 'GetLifeCycleState not callable;';
     End;
 
     Try
         GotRevs := IntegratedLibraryManager.GetOrderedRevisionList(
-            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId, RevList);
+            EffKind, VaultName, DesignItemId, RevList);
     Except
         Diag := Diag + 'GetOrderedRevisionList not callable;';
     End;
 
     Try
         PlaceParams := IntegratedLibraryManager.GetComponentPlacementParameters(
-            LIB_IDENT_KIND_VAULT_NAME, VaultName, DesignItemId);
+            EffKind, VaultName, DesignItemId);
     Except
         Diag := Diag + 'GetComponentPlacementParameters not callable;';
     End;
 
+    { THE LOADER IS THE AUTHORITY on whether this item can be placed, and
+      FindComponentSymbol is not. MEASURED on a Workspace-only installation:
+      FindComponentSymbol returns false for EVERY kind on an item that
+      SchServer.LoadComponent then places with exactly the GUIDs Altium's own
+      placements carry. Reporting found_symbol as existence made this tool
+      advise against placements that work, which is worse than offering no dry
+      run at all.
+
+      So ask the call the placement itself uses, and throw the object away:
+      LoadComponent hands back a component that belongs to no document until
+      AddSchObject, and DestroySchObject releases it the same way the object
+      factory's callers here do. Nothing is added to any sheet, so this stays
+      read-only as far as the design is concerned.
+
+      The requested kind goes first because it is the one a placement would
+      use; the rest follow only if it comes back Nil, which keeps the normal
+      case at a single load. }
+    LoadProbe := '';
+    LoadKind := -1;
+    Placeable := False;
+    LoaderCallable := False;
+    ProbeId := '';
+    ProbeVaultGuid := '';
+    ProbeItemGuid := '';
+    ProbeRevGuid := '';
+
+    For LSlot := 0 To 5 Do
+    Begin
+        If Placeable Then Break;
+        If LSlot = 0 Then
+            LK := IdentKind
+        Else
+        Begin
+            LK := LSlot - 1;
+            If LK = IdentKind Then Continue;
+        End;
+        If (LK < 0) Or (LK > LIB_IDENT_KIND_VAULT_NAME) Then Continue;
+
+        Probe := Nil;
+        TryRan := False;
+        Try
+            Probe := SchServer.LoadComponent(LK, VaultName, DesignItemId);
+            TryRan := True;
+        Except End;
+
+        If TryRan Then LoaderCallable := True;
+        If LoadProbe <> '' Then LoadProbe := LoadProbe + ',';
+        If Not TryRan Then
+            LoadProbe := LoadProbe + IntToStr(LK) + ':raised'
+        Else If Probe = Nil Then
+            LoadProbe := LoadProbe + IntToStr(LK) + ':nil'
+        Else
+            LoadProbe := LoadProbe + IntToStr(LK) + ':loaded';
+
+        If Probe <> Nil Then
+        Begin
+            Placeable := True;
+            LoadKind := LK;
+            Try ProbeId := Probe.DesignItemId; Except End;
+            Try ProbeVaultGuid := Probe.VaultGUID; Except End;
+            Try ProbeItemGuid := Probe.ItemGUID; Except End;
+            Try ProbeRevGuid := Probe.RevisionGUID; Except End;
+            { Never leave it dangling: it is owned by nothing at this point. }
+            Try SchServer.DestroySchObject(Probe); Except End;
+            Probe := Nil;
+        End;
+    End;
+
+    If Not LoaderCallable Then
+        Diag := Diag + 'SchServer.LoadComponent raised for every kind ('
+            + LoadProbe + '), the managed loader is not exposed by this host, '
+            + 'so placeability could not be established;'
+    Else If Placeable And (Not FoundSymbol) Then
+        Diag := Diag + 'PLACEABLE ANYWAY: the loader returned this item for '
+            + 'kind ' + IntToStr(LoadKind) + ' (' + LoadProbe + ') even though '
+            + 'FindComponentSymbol denied it for every kind. The library '
+            + 'manager answers only for AVAILABLE (installed) libraries, so on '
+            + 'a Workspace-only installation its verdict is a false negative '
+            + 'and must not be read as absence. Place with '
+            + 'sch_place_vault_components;'
+    Else If Not Placeable Then
+        Diag := Diag + 'NOT PLACEABLE: the loader returned nothing for this ID ('
+            + LoadProbe + '), so it does not resolve in Workspace "' + VaultName
+            + '" and neither did FindComponentSymbol. Check the ID FORM first, '
+            + 'a placed managed component carries it WITH the revision suffix '
+            + '(CMP-nnnnnn-x.y.z); read a known-good one off a part Altium '
+            + 'placed itself with obj_query eSchComponent for DesignItemId, '
+            + 'LibraryIdentifier, LibIdentifierKind;';
+
     Result := BuildSuccessResponse(RequestId,
         '{"design_item_id":"' + EscapeJsonString(DesignItemId) + '"'
         + ',"vault":"' + EscapeJsonString(VaultName) + '"'
+        + ',"lib_identifier_kind":' + IntToStr(EffKind)
+        + ',"lib_identifier_kind_requested":' + IntToStr(IdentKind)
+        + ',"resolved_lib_identifier_kind":' + IntToStr(ResolvedKind)
+        + ',"kind_probe":"' + EscapeJsonString(KindProbe) + '"'
+        + ',"symbol_call_ran":' + BoolToJsonStr(SymbolCallRan)
+        + ',"placeable":' + BoolToJsonStr(Placeable)
+        + ',"loader_callable":' + BoolToJsonStr(LoaderCallable)
+        + ',"loader_kind":' + IntToStr(LoadKind)
+        + ',"load_probe":"' + EscapeJsonString(LoadProbe) + '"'
+        + ',"probe_design_item_id":"' + EscapeJsonString(ProbeId) + '"'
+        + ',"probe_vault_guid":"' + EscapeJsonString(ProbeVaultGuid) + '"'
+        + ',"probe_item_guid":"' + EscapeJsonString(ProbeItemGuid) + '"'
+        + ',"probe_revision_guid":"' + EscapeJsonString(ProbeRevGuid) + '"'
         + ',"found_symbol":' + BoolToJsonStr(FoundSymbol)
         + ',"symbol_reference":"' + EscapeJsonString(SymbolRef) + '"'
         + ',"symbol_library_path":"' + EscapeJsonString(SymbolLibPath) + '"'

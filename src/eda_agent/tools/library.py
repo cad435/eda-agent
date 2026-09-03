@@ -3610,6 +3610,13 @@ def register_library_tools(mcp):
         but by (Workspace name, Design Item ID), and the Workspace name is
         the ``identifier`` of the entry whose ``is_vault`` is true.
 
+        AN EMPTY LIST IS NORMAL on an installation with no file libraries:
+        this enumerates INSTALLED libraries and a connected Workspace need
+        not appear in it at all, so ``total`` 0 is not evidence that no
+        Workspace is connected. ``workspace_from_design`` covers that case
+        by reading the name off a managed component already placed in the
+        design, which is the spelling Altium itself resolved.
+
         The managed tools resolve the Workspace themselves while exactly one
         is connected, so this is only needed when several are, or when a
         managed call answers VAULT_NOT_RESOLVED.
@@ -3630,6 +3637,7 @@ def register_library_tools(mcp):
     async def lib_get_vault_component(
         design_item_id: str,
         vault: str = "",
+        lib_identifier_kind: Optional[int] = None,
     ) -> dict[str, Any]:
         """Resolve ONE managed (Workspace/Vault) component by Design Item ID.
 
@@ -3640,30 +3648,55 @@ def register_library_tools(mcp):
         model's Browse* siblings of these calls open a dialog and would
         block the bridge, so they are not used).
 
-        A VPN -- or any other parameter value -- is NOT resolved to a Design
-        Item ID here. The managed API offers no reverse lookup from a
-        parameter to an item, so that mapping belongs outside this server
-        (ERP export, the Nexar/GraphQL side). Pass the Design Item ID.
+        A part number -- or any other parameter value -- is NOT resolved to
+        a Design Item ID here. The managed API offers no reverse lookup from
+        a parameter to an item, so that mapping belongs outside this server
+        (an ERP export, or the Nexar/GraphQL side). Pass the Design Item ID.
 
         Args:
             design_item_id: the managed component's Design Item ID.
-            vault: Workspace name. Omit while exactly one Workspace is
-                connected; on VAULT_NOT_RESOLVED take it from
-                ``lib_list_vault_libraries``.
+            vault: Workspace name. Usually omit it: the name is read off
+                managed components already on any OPEN sheet, which is
+                where Altium wrote it. On VAULT_NOT_RESOLVED follow the
+                steps that refusal lists, and never invent a name.
+            lib_identifier_kind: which KIND of identifier ``vault`` is, as
+                Altium's TLibIdentifierKind: 0 Any, 1 NameNoType,
+                2 NameWithType, 3 FullPath, 4 VaultName (the default). Only
+                worth setting when the default does not resolve: read
+                ``LibIdentifierKind`` and ``LibraryIdentifier`` off a managed
+                component Altium placed itself (``obj_query`` on
+                ``eSchComponent``) and pass those, instead of guessing at the
+                Workspace name.
 
         Returns:
-            {"design_item_id", "vault", "found_symbol": bool,
+            {"design_item_id", "vault", "lib_identifier_kind",
+             "placeable": bool, "loader_callable": bool, "loader_kind",
+             "load_probe", "probe_design_item_id", "probe_vault_guid",
+             "probe_item_guid", "probe_revision_guid",
+             "found_symbol": bool, "symbol_call_ran": bool, "kind_probe",
              "symbol_reference", "symbol_library_path",
              "component_library_path", "display_path", "lifecycle_state",
              "has_revisions": bool, "revisions", "placement_parameters",
              "diag"}
-            ``diag`` names every object-model call that was not available,
-            so an empty field can be told apart from a missing method.
+
+            READ ``placeable``, NOT ``found_symbol``. ``placeable`` comes
+            from the loader the placement itself uses, asked and then
+            discarded; ``found_symbol`` comes from the library manager,
+            which answers only for AVAILABLE (installed) libraries. On a
+            Workspace-only installation the second is a FALSE NEGATIVE:
+            measured, it denies every identifier kind for items that place
+            perfectly. ``diag`` says so when the two disagree.
+
+            ``probe_vault_guid`` / ``probe_item_guid`` /
+            ``probe_revision_guid`` are the identity the loaded component
+            carries, which is what the sheet would persist.
         """
         bridge = get_bridge()
         params: dict[str, Any] = {"design_item_id": design_item_id}
         if vault:
             params["vault"] = vault
+        if lib_identifier_kind is not None:
+            params["lib_identifier_kind"] = int(lib_identifier_kind)
         return await bridge.send_command_async(
             "library.get_vault_component", params
         )

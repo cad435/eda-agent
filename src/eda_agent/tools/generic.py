@@ -50,6 +50,14 @@ def register_generic_tools(mcp):
                 PinLength is a common source of wrong conclusions about
                 what is wired.
                 "Designator.Text,Comment.Text,LibReference" for components
+                A MANAGED (Workspace) component also answers to its
+                identity, read-only: "LibIdentifierKind,LibraryIdentifier,
+                DesignItemId,VaultGUID,ItemGUID,RevisionGUID,
+                SymbolReference,SymbolVaultGUID,SymbolItemGUID,
+                SymbolRevisionGUID". Reading those off a part Altium placed
+                itself is how you learn the exact triple that resolves in
+                this Workspace, which the managed tools then have to
+                reproduce; the file stores the GUIDs, not a library path.
 
                 PCB PRIMITIVES DO NOT. They are a separate, flat set,
                 and mixing the two is the single commonest mistake here:
@@ -2497,6 +2505,7 @@ def register_generic_tools(mcp):
         placements: list[dict[str, Any]],
         vault: str = "",
         document_path: Optional[str] = None,
+        lib_identifier_kind: Optional[int] = None,
     ) -> dict[str, Any]:
         """Place MANY MANAGED (Workspace/Vault) components in ONE call.
 
@@ -2509,10 +2518,11 @@ def register_generic_tools(mcp):
         the symbol. Placing such a part through ``sch_place_components``
         cannot work, there is no path to give it.
 
-        A VPN (or any other parameter) is NOT resolved here -- the managed
-        API has no reverse lookup from a parameter value to a Design Item
-        ID, so resolve it outside this server and pass the ID. Verify an ID
-        first with ``lib_get_vault_component`` if you are unsure it exists.
+        A part number, or any other parameter value, is NOT resolved here
+        -- the managed API has no reverse lookup from a parameter value to
+        a Design Item ID, so resolve it outside this server and pass the
+        ID. Verify an ID first with ``lib_get_vault_component`` if you are
+        unsure it exists.
 
         TARGET DOCUMENT: placement lands on the ACTIVE schematic. Right
         after ``app_create_document`` the new sheet is NOT auto-focused, so
@@ -2527,12 +2537,16 @@ def register_generic_tools(mcp):
                 - x, y (int, mils), placement location
                 - designator (str, optional), override designator
                 - rotation (int, optional), 0 / 90 / 180 / 270
-            vault: Workspace name for the whole batch. Omit while exactly
-                one Workspace is connected; on VAULT_NOT_RESOLVED take it
-                from ``lib_list_vault_libraries``. It is batch-level on
-                purpose: one sheet placed out of two Workspaces is not a
-                real case, and resolving per part would repeat the
-                available-library scan for every placement.
+            vault: Workspace name for the whole batch. Usually omit it: the
+                name is read off managed components already on any OPEN
+                sheet of the design, which is where Altium itself wrote it.
+                That fails only when no open sheet carries a managed part
+                (a brand-new design), and the VAULT_NOT_RESOLVED refusal
+                then spells out what to do. Do NOT invent a name to get past
+                it: a wrong one does not fail, it links the components to the
+                wrong library, which looks right on the sheet and is wrong in
+                the BOM. It is batch-level on purpose, one sheet placed out
+                of two Workspaces is not a real case.
             document_path: absolute path of the .SchDoc to place onto,
                 focused before placement so parts cannot land on the wrong
                 sheet. Omitted uses the current active document.
@@ -2549,12 +2563,15 @@ def register_generic_tools(mcp):
             ])
 
         Returns:
-            {"placed", "failed", "total", "vault",
+            {"placed", "failed", "total", "vault", "lib_identifier_kind",
              "loader_callable": bool, "items": [...], "diag"}
-            Each item carries ``linked_design_item_id`` read back off the
-            placed component: that is the evidence the placement is linked
-            to the Workspace item, so an empty one on a "placed" item means
-            the symbol landed WITHOUT its managed link. ``reason`` tells
+            Each item carries ``linked_design_item_id`` plus the
+            ``linked_vault_guid`` / ``linked_item_guid`` /
+            ``linked_revision_guid`` read back off the placed component. The
+            GUIDs are the identity the sheet actually persists, so they are
+            the evidence the placement is linked to the Workspace item:
+            empty GUIDs on a "placed" item mean the symbol landed WITHOUT
+            its managed link, even when the ID text came back. ``reason`` tells
             NOT_FOUND_IN_VAULT (that one ID did not resolve) apart from
             LOAD_RAISED (the managed loader is not callable at all, which
             ``loader_callable``/``diag`` then report for the whole batch).
@@ -2598,6 +2615,8 @@ def register_generic_tools(mcp):
         params: dict[str, Any] = {"placements": "~~".join(op_strs)}
         if vault:
             params["vault"] = vault
+        if lib_identifier_kind is not None:
+            params["lib_identifier_kind"] = int(lib_identifier_kind)
         return await bridge.send_command_async(
             "generic.place_sch_vault_components", params
         )

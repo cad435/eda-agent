@@ -39,9 +39,9 @@ works elsewhere cannot be an undeclared identifier:
 | 17, component UniqueId | `UniqueId` on a placed component | no, nowhere | highest, and a wrong id costs the next Update PCB |
 | 18, pin owner part | `OwnerPartId` | yes, by two independent reference scripts | medium, behavioural not declarative |
 | 6, mirrored text | `MirrorFlag` | yes, `PCB.pas` | lowest |
-| 19, managed loader | `LoadComponent` | no, nowhere | highest, the whole placement depends on it |
-| 19, managed library list | `AvailableLibraryPath`, `AvailableLibraryType` | no, nowhere | high, and without them no Workspace can be named |
-| 19, managed item resolve | `FindComponentSymbol`, `GetOrderedRevisionList`, `GetLifeCycleState`, `GetComponentPlacementParameters` | no, nowhere | high, but read-only and each is caught on its own |
+| 19, managed loader | `LoadComponent` | no, nowhere | RUN: exists, places, and the link survives a save |
+| 19, managed library list | `AvailableLibraryPath`, `AvailableLibraryType` | no, nowhere | RUN: callable, but the list is EMPTY here and cannot name a Workspace |
+| 19, managed item resolve | `FindComponentSymbol`, `GetOrderedRevisionList`, `GetLifeCycleState`, `GetComponentPlacementParameters` | no, nowhere | RUN: all callable, all answer no for managed content, a false negative |
 
 Steps 5 and 2 are the ones that justify a live session. The bottom rows
 write properties this codebase already exercises, so they are checking
@@ -936,124 +936,99 @@ it. A library edit is real in memory and absent from disk until then.
 
 ---
 
-## 19. Managed (Vault) placement
+## 19. Managed (Vault) placement - RUN 2026-09-03, and the outcome
 
-The first code in this repository to call the managed side of Altium's
-object model. A file-library component is loaded by (LibReference,
-LibraryPath); a managed one has neither and is loaded by
-(LibIdentifierKind, LibraryIdentifier, DesignItemID). Only the loader
-differs, so everything after it (`AddSchObject`, `MoveToXY`,
-orientation, designator, registration) is the same code the file-library
-path already uses.
+Placement WORKS and is verified. What does not work is the library
+manager this step was written around, and the distinction matters
+because the broken half was reporting on the working half.
 
-Added: `Lib_ListVaultLibraries`, `Lib_GetVaultComponent` and
-`ResolveVaultLibrary` in `Library.pas`, `Gen_PlaceSchVaultComponents` in
-`Generic.pas`, reached by `lib_list_vault_libraries`,
-`lib_get_vault_component` and `sch_place_vault_components`.
+Measured on Altium Designer 26.9.1, script 2026.09.03.3, on an
+installation with ZERO file-based libraries and exactly one connected
+Workspace. Below, `<Workspace>` stands for that Workspace's name as
+Altium spells it and `CMP-nnnnnn-x.y.z` for a Design Item ID that
+exists in it.
 
-The interface members were read out of `Altium.SDK.Interfaces.dll` by
-reflection and the two enums out of Delphi RTTI in
-`ScriptingSystem.dll` (unit `RT_Library`), so the names and argument
-orders come from the shipped object model rather than from guesswork.
-That establishes that AD20 **declares** them. It does not establish that
-this DelphiScript host **exposes** them, which is what these steps are
+### What was measured
+
+| Call | Result |
+|---|---|
+| `AvailableLibraryCount` | 0, no exception; `InstalledLibraryCount` 0 as well |
+| `FindComponentSymbol(k, "<Workspace>", "CMP-nnnnnn-x.y.z")`, k = 0..4 | false for EVERY kind |
+| `SchServer.LoadComponent(4, "<Workspace>", "CMP-nnnnnn-x.y.z")` | returns a component |
+| that component after `AddSchObject`, then saved and re-read off disk | fully managed, GUIDs identical to Altium's own placements |
+
+The ID in that table is not a guess. Four components on an existing
+sheet of that installation ARE that Design Item ID, placed by Altium
+itself, and they read back `LibIdentifierKind` 4 with
+`LibraryIdentifier` set to the Workspace name. So the triple
+`FindComponentSymbol` denied for all five kinds is the triple Altium
+uses for those very parts.
+
+### The conclusion that changed the code
+
+`IIntegratedLibraryManager`'s `Find*` / `Get*` family answers only for
+AVAILABLE (installed) libraries. With none installed its answer is "no"
+to everything managed, and that is a FALSE NEGATIVE rather than an
+absence. Three consequences, all now fixed:
+
+1. `ResolveVaultLibrary` cannot get a Workspace name out of
+   `AvailableLibrary*` here, because that list is empty by
+   construction. It now falls back to reading the name off managed
+   components on any OPEN sheet, which is where Altium wrote it.
+2. `lib_get_vault_component` must not present `found_symbol` as
+   existence. It now loads the item through the placement's own loader
+   and immediately discards it, and reports `placeable`. When the two
+   disagree the `diag` says which one to believe.
+3. An empty `lib_list_vault_libraries` is a NORMAL state here, not a
+   failure, and now says so instead of returning `total` 0 with an
+   empty `diag`.
+
+Kind 4 is preferred deliberately: the SAME VaultGUID appeared in one
+design under TWO identifiers, the Workspace's current name with
+`LibIdentifierKind` 4 and an older display name of the same Workspace
+with kind 1. Taking whichever component the iterator reaches first
+would hand the loader an alias.
+
+The scan reads only sheets Altium already has OPEN.
+`GetSchDocumentByPath` would LOAD one that is not, and a project here
+carries dozens, so a name lookup must not turn into opening the whole
+design. Scanning the ACTIVE sheet alone is not enough either: placing
+onto a fresh sheet is the normal case and a fresh sheet has nothing to
+learn the name from, which is exactly the situation the tool exists
 for.
 
-| Added call | Written elsewhere in shipped code? | Risk |
-|---|---|---|
-| `SchServer.LoadComponent(kind, ident, id)` | no, nowhere | highest, and the placement depends on it entirely |
-| `IntegratedLibraryManager.AvailableLibraryCount` / `AvailableLibraryPath` / `AvailableLibraryType` | no; only `InstallLibrary` / `UnInstallLibrary` are | high |
-| `FindComponentSymbol`, `GetOrderedRevisionList` | no, and their `Var` out-parameters are unexercised anywhere in this codebase | high |
-| `FindComponentLibraryPath`, `FindComponentDisplayPath`, `GetLifeCycleState`, `GetComponentPlacementParameters` | no, nowhere | high |
-| `ISch_Component.DesignItemId` (read) | no, nowhere | medium |
-| `LIB_IDENT_KIND_VAULT_NAME`, `LIB_SRC_VAULT` | own `Const` block in `Main.pas` | none, integers on purpose |
+### The Try/Except dispute, as far as this step settles it
 
-`TLibIdentifierKind` = 0 Any, 1 NameNoType, 2 NameWithType, 3 FullPath,
-**4 VaultName**. `TLibrarySource` = 0 Undefined, 1 File, **2 Vault**.
-They are spelled as numbers because `eLibIdentifierKind_VaultName` is
-not a predefined identifier in this host, and naming it would be the
-very fault these steps are hunting.
+The preamble and section 19's original text disagreed about whether an
+identifier this host does not expose faults where `Try/Except` cannot
+reach it. **Step 19 does not settle that.** Every managed method named
+here turned out to EXIST, so the case never arose:
+`AvailableLibraryCount`, `AvailableLibraryType`, `FindComponentSymbol`,
+`GetLifeCycleState`, `GetOrderedRevisionList`,
+`GetComponentPlacementParameters`, `FindComponentLibraryPath`,
+`FindComponentDisplayPath`, `SchServer.LoadComponent` and
+`SchServer.DestroySchObject` all returned without raising, and the
+polling loop survived every call, across three Altium restarts.
 
-Every managed call sits in its own inner `Try`, on the assumption that
-an unavailable method raises, is caught, and leaves a `diag` naming it.
-**This document's own preamble asserts the opposite**: that an
-undeclared identifier faults where `Try/Except` cannot reach it and
-halts the polling loop. Both claims are in this repository and they
-cannot both hold here.
+What it does establish is narrower and still worth having: a method
+that exists but has nothing to say returns false or empty rather than
+raising. That is precisely why the `diag` fields have to name the call
+they are reporting on, because a blank field on its own cannot tell a
+missing method from a genuine empty answer.
 
-Until 19a settles it, assume the harsher one. Run 19a as the FIRST call
-after the restart, with nothing else in flight, and treat a dead bridge
-as a possible outcome rather than a surprise. If the loop stops, that is
-not a bug in the handler, it is the answer: the host does not expose the
-call and the inner `Try` does not save it. Re-run `StartMCPServer` and
-record which call did it.
+### Still untested
 
-### 19a. Is the managed library list readable at all?
-
-`lib_list_vault_libraries`, nothing else in flight.
-
-Expected: `total` matching the count under *Data Management > File-based
-Libraries* plus the connected Workspace, and exactly one entry with
-`is_vault` = `true` whose `identifier` is the Workspace name. Keep that
-name; 19b and 19c need it if the classification is off.
-
-The two informative failures:
-
-* `source` = `-1` on every entry, with `diag` naming
-  `AvailableLibraryType`. The list is readable but the file/managed
-  distinction is not, so every later call needs an explicit `vault=`.
-* `ENUM_FAILED`. `AvailableLibraryCount` itself is not callable and no
-  part of this step can work. Stop here.
-
-### 19b. Does a Design Item ID resolve?
-
-`lib_get_vault_component` with a Design Item ID read off the Components
-panel, for a part you know is in that Workspace. Worth writing the ID
-down before starting: hunting for one mid-session wastes the session.
-
-Expected: `found_symbol` = `true`, `symbol_reference` naming the symbol
-the panel shows, a `lifecycle_state` matching the panel, a non-empty
-`revisions`, and an empty `diag`.
-
-Read `diag` before believing any empty field. An empty
-`lifecycle_state` with `GetLifeCycleState not callable;` in `diag` is a
-missing method; an empty one with an empty `diag` is a real empty value.
-Telling those two apart is the only reason the field exists.
-
-### 19c. Does a managed placement keep its link?
-
-Placement WRITES. Scratch SchDoc in a throwaway project, not a real
-design.
-
-`sch_place_vault_components` with one placement: the ID from 19b, a
-known x/y, an explicit designator.
-
-Expected: `placed` = `1`, `loader_callable` = `true`, and the item's
-`linked_design_item_id` echoing the ID that was asked for.
-
-Then look at the sheet, because the reply cannot see this:
-
-1. The symbol sits at the coordinates given, with the designator set.
-2. Altium shows the component as **managed**, not as a loose copy of a
-   symbol. `linked_design_item_id` coming back empty on an otherwise
-   placed item is exactly that failure: the geometry landed and the
-   Workspace link did not.
-3. Save the sheet, close it, reopen it, read the component again. A link
-   that is written but never committed disappears on save, and this
-   codebase has already been bitten by precisely that on the PCB side,
-   where `Pad.Net` needed a `PCBM_BeginModify` / `PCBM_EndModify`
-   bracket to survive a save. If the link is gone after a round trip,
-   the placement needs the schematic equivalent and the current code is
-   wrong.
-
-`loader_callable` = `false` with `LOAD_RAISED` on every item means
-`SchServer.LoadComponent` is not exposed by this host. That is this
-step's central risk, and it is reported per batch rather than per part
-so it cannot be mistaken for a batch of bad IDs.
+The third branch of the `VAULT_NOT_RESOLVED` refusal, the one that
+tells the caller to stop and ask the user for the Workspace name.
+Reaching it needs a session where NO open sheet carries a managed
+component, and every sheet of this design does. Both handlers raise
+that text through the same `VaultNotResolvedMessage`, so it is a single
+code path, but it has not been seen live.
 
 ### Deliberately not in step 19
 
-Resolving a VPN, or any other parameter value, to a Design Item ID. The
+Resolving a part number, or any other parameter value, to a Design
+Item ID. The
 managed API offers no reverse lookup from a parameter to an item, so it
 would mean scanning a whole library per query. That mapping is
 maintained outside this server, and these tools take the Design Item ID
